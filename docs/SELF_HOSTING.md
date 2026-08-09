@@ -224,6 +224,36 @@ means replacing `<data-dir>/server-token`.
 Sessions also expire on their own after 30 days, enforced server-side from the
 signed timestamp inside the cookie rather than from its `Max-Age`.
 
+## Background sync
+
+Data keeps refreshing without anyone watching. One scheduled job — a single
+timer for the whole instance, not one per account — wakes every **ten minutes**,
+reads the accounts index, and syncs the current day for every account that is
+still connected. Closing the browser does not stop it; the server is doing the
+work, not the page.
+
+Because the job re-reads the index on every tick, an account that signs in
+between ticks is picked up with no other wiring, and one that stops being used
+simply stops appearing. Accounts are synced one at a time on purpose: the Google
+Health adapter paces its own requests, and running accounts concurrently would
+burst past that limit on behalf of all of them at once.
+
+Signing in also triggers an immediate refresh for that account, so somebody
+returning after a lapse sees current data rather than whatever was cached when
+they left.
+
+Failures are contained per account — one account's expired token never stops the
+others — and a repeated failure is logged once rather than every ten minutes.
+
+**What stops it.** While your OAuth consent screen is in testing mode, Google
+expires refresh tokens after seven days. After that the account reports
+disconnected, the job skips it, and syncing resumes when you sign in again. See
+the troubleshooting table below.
+
+Two limits worth knowing: the job syncs the **current day only**, so days missed
+entirely while the server was down are not backfilled; and it starts only once
+the server is listening, so a failed bind never reaches Google.
+
 ## The desktop app
 
 The Electron app is a second host over the same backend: `electron/main.cjs` and
@@ -445,7 +475,8 @@ both reuse their own local login, and OpenFit never stores an API key.
 | The desktop app says port 7790 is in use | Another copy is already running, or something else took the port. The port is fixed because it is in the registered redirect URI. |
 | Clicking sign-in in the desktop app opens a browser | By design. Google's consent screen is unreliable inside an application window; the window picks up the session when the callback completes. |
 | The desktop window stays on the sign-in page after signing in in the browser | The window adopts only the flow it started itself, and only within ten minutes. Click **Sign in with Google** in the window and finish that browser tab, rather than an older one or a bookmark. |
-| Health disconnected after about a week | Google expires refresh tokens for apps in testing after 7 days. Sign in again — **Reconnect** in the app, which forces a fresh consent. You are not signed out; only health access lapsed. |
+| Health disconnected after about a week | Google expires refresh tokens for apps in testing after 7 days. Sign in again — **Reconnect** in the app, which forces a fresh consent. You are not signed out; only health access lapsed. Background sync stops for that account while it is disconnected and resumes on the next sign-in. |
+| Data stopped updating on its own | Check the account is still connected — an expired refresh token stops background sync for that account and nothing else. The server log names the account and the reason once, not on every tick. |
 | The sign-in page comes back instead of the dashboard | The session cookie is missing, expired, or revoked by a *sign out everywhere*. Sign in again. |
 | `Sign-in took too long. Start again.` | The pending cookie is older than 10 minutes, or the browser started at one origin and Google returned to another. Start from the origin registered with the OAuth client. |
 | `redirect_uri_mismatch` at Google | The registered redirect URI is not `<origin>/auth/callback` for the origin you started from. |

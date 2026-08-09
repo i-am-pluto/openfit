@@ -8,6 +8,7 @@ const { createApp, normalizePublicOrigin } = require('../core/app.cjs')
 const { validateIdToken } = require('../core/identity.cjs')
 const { buildGoogleAuthUrl, exchangeGoogleCode } = require('../core/providers/google-health.cjs')
 const { createSecretStore } = require('../core/secrets.cjs')
+const { createSyncScheduler } = require('../core/scheduler.cjs')
 const { createServer } = require('./index.cjs')
 const { createSessions } = require('./session.cjs')
 
@@ -70,6 +71,7 @@ function composeBackend(options = {}) {
     token = null,
     safeStorage = null,
     afterAuthorized = null,
+    syncIntervalMs,
   } = options
 
   if (!dataDir) throw new Error('composeBackend requires a data directory.')
@@ -125,6 +127,12 @@ function composeBackend(options = {}) {
 
   const sessions = createSessions({ masterKey: secrets.masterKey(), secure })
 
+  // One timer for every account, not one per sign-in. It reads the accounts
+  // index on each tick, so it needs no notification when somebody signs in and
+  // leaves nothing behind when they stop using the instance. The host owns its
+  // lifecycle: nothing starts until `scheduler.start()`.
+  const scheduler = createSyncScheduler({ accounts, registry, intervalMs: syncIntervalMs })
+
   const { server, auth } = createServer({
     staticRoot,
     dataDir,
@@ -163,6 +171,12 @@ function composeBackend(options = {}) {
       onAuthorized: async (account, tokens, context) => {
         const status = await registry.forAccount(account).adoptToken(tokens)
         if (afterAuthorized) await afterAuthorized(account, context)
+        // Somebody signing back in has usually been away longer than a tick, so
+        // their dashboard would open on stale data and only catch up when the
+        // scheduler next came round. Deliberately not awaited: the callback owes
+        // the browser a redirect, not a second round trip to Google, and
+        // `syncAccountNow` never rejects.
+        void scheduler.syncAccountNow(account)
         return status
       },
     },
@@ -174,6 +188,7 @@ function composeBackend(options = {}) {
     secrets,
     accounts,
     registry,
+    scheduler,
     sessions,
     identity,
     secure,

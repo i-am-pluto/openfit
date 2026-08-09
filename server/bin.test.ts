@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const require = createRequire(import.meta.url)
 const bin = require('./bin.cjs') as {
-  main: (argv: string[], env: Record<string, string>) => { server: any; registry: any; accounts: any; sessions: any }
+  main: (argv: string[], env: Record<string, string>) => { server: any; registry: any; accounts: any; sessions: any; scheduler: any }
   banner: (options: Record<string, any>) => string
 }
 const { accountId } = require('../core/accounts.cjs') as { accountId: (sub: string) => string }
@@ -81,27 +81,55 @@ async function start(extraEnv: Record<string, string> = {}) {
   })
 
   await once(started.server, 'listening')
-  return { ...started, port, dataDir, logs, origin: `http://127.0.0.1:${port}` }
+
+  // The refresh a sign-in kicks off is deliberately not awaited, and the Google
+  // adapter paces its ~20 requests 225ms apart through a module-global cursor —
+  // so it would still be issuing them after the test that triggered it restored
+  // the real `fetch`. Recorded rather than performed; one test asserts on it.
+  const refreshed: any[] = []
+  started.scheduler.syncAccountNow = async (account: any) => {
+    refreshed.push(account)
+    return { status: 'recorded' }
+  }
+  cleanups.push(() => started.scheduler.stop())
+
+  return { ...started, port, dataDir, logs, refreshed, origin: `http://127.0.0.1:${port}` }
 }
 
 /**
- * Answers Google's token endpoint and lets every other request through.
+ * Intercepts both Google hosts this server talks to, and lets every other
+ * request through — the server under test runs in this process, so a blanket
+ * stub would also swallow the requests this file makes to drive it.
  *
- * The server under test runs in this process, so a blanket `fetch` stub would
- * also swallow the requests this file makes to drive it. Only the token URL is
- * intercepted; nothing here reaches the network.
+ * The Health host has to be stubbed as well as the token host: signing in now
+ * kicks off a scheduler refresh for that account, and without this the suite
+ * would make real outbound requests. `healthCalls` is what proves that refresh
+ * was actually wired.
  */
 function stubGoogleTokenEndpoint(payload: Record<string, unknown>) {
   const realFetch = globalThis.fetch
   const bodies: URLSearchParams[] = []
+  const healthCalls: string[] = []
   vi.stubGlobal('fetch', async (input: any, init: any = {}) => {
-    if (!String(input).startsWith('https://oauth2.googleapis.com/token')) return realFetch(input, init)
-    bodies.push(new URLSearchParams(String(init.body)))
-    return { ok: true, json: async () => payload }
+    const url = String(input)
+    if (url.startsWith('https://oauth2.googleapis.com/token')) {
+      bodies.push(new URLSearchParams(String(init.body)))
+      return { ok: true, json: async () => payload }
+    }
+    if (url.startsWith('https://health.googleapis.com/') || url.startsWith('https://www.googleapis.com/oauth2/')) {
+      healthCalls.push(url)
+      // A shape the adapter treats as an empty but successful response, so the
+      // refresh completes instead of retrying against the real network.
+      return { ok: true, status: 200, json: async () => ({}) }
+    }
+    return realFetch(input, init)
   })
   cleanups.push(() => vi.unstubAllGlobals())
-  return bodies
+  return Object.assign(bodies, { healthCalls })
 }
+
+/** Lets a fire-and-forget refresh reach its first request before asserting. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20))
 
 // Unsigned on purpose: core/identity.cjs documents why it validates claims
 // without verifying the signature for a token taken straight from the token
@@ -129,7 +157,7 @@ async function signIn(origin: string, { sub, email }: { sub: string; email: stri
   const authorize = new URL(String(login.headers.get('location')))
   const pending = cookieValue(login, 'openfit_pending')
 
-  stubGoogleTokenEndpoint({
+  const google = stubGoogleTokenEndpoint({
     access_token: 'access-1',
     refresh_token: 'refresh-1',
     expires_in: 3600,
@@ -148,7 +176,7 @@ async function signIn(origin: string, { sub, email }: { sub: string; email: stri
     `${origin}/auth/callback?code=auth-code&state=${authorize.searchParams.get('state')}`,
     { redirect: 'manual', headers: { cookie: pending } },
   )
-  return { callback, cookie: cookieValue(callback, 'openfit_session') }
+  return { callback, cookie: cookieValue(callback, 'openfit_session'), google }
 }
 
 describe('server entry point', () => {
@@ -259,6 +287,38 @@ describe('server entry point', () => {
 
     // Requirement 9: the renderer's live update has a publisher again.
     expect(announced).toEqual([{ ok: true }])
+  })
+
+  it('runs a single scheduler on a ten minute interval, started by main', async () => {
+    const started = await start()
+
+    // One job for the instance, not one per account: nothing here is keyed by
+    // an account, and the interval is the documented ten minutes.
+    expect(started.scheduler.intervalMs).toBe(600_000)
+
+    // `start()` is idempotent and already ran, so a tick is live. If main() had
+    // composed a scheduler and never started it, this would still be a no-op —
+    // which is why the refresh-on-sign-in test below is the real pin.
+    expect(typeof started.scheduler.stop).toBe('function')
+    started.scheduler.stop()
+  })
+
+  it('refreshes an account as soon as it signs in, without blocking the callback', async () => {
+    const { origin, refreshed } = await start()
+    const { accountId } = require('../core/accounts.cjs') as { accountId: (sub: string) => string }
+
+    const { callback } = await signIn(origin, { sub: 'google-sub-1', email: 'ada@example.com' })
+
+    // The redirect is not held open waiting for Google a second time.
+    expect(callback.status).toBe(302)
+    await settle()
+
+    // Somebody signing back in after a lapse would otherwise stare at week-old
+    // numbers until the next tick. Deleting the `syncAccountNow` call in
+    // server/compose.cjs leaves this empty, and it is the account that just
+    // signed in — not merely "an" account.
+    expect(refreshed).toHaveLength(1)
+    expect(refreshed[0]).toMatchObject({ id: accountId('google-sub-1'), email: 'ada@example.com' })
   })
 
   it('issues a session cookie that authenticates the very next request', async () => {

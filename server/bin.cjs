@@ -135,7 +135,7 @@ function main(argv = process.argv.slice(2), env = process.env) {
   // server/compose.cjs creates the data directory, the instance secret store,
   // the accounts index, the per-account registry, the session store and the
   // HTTP server, and it is the only place any of that is wired.
-  const { server, secrets, registry, accounts, sessions } = composeBackend({
+  const { server, secrets, registry, accounts, sessions, scheduler } = composeBackend({
     dataDir,
     staticRoot,
     env,
@@ -165,9 +165,17 @@ function main(argv = process.argv.slice(2), env = process.env) {
       storageBackend: secrets.describe().backend,
       agents: createAgentRegistry({ env }).list(),
     }))
+
+    // Started only once the socket is up, so a failed bind exits without ever
+    // having reached Google. The immediate catch-up run refreshes accounts that
+    // went stale while the process was down.
+    scheduler.start()
   })
 
   const shutdown = () => {
+    // Before `close`, so a tick cannot start a sync against a registry that
+    // `server.on('close')` is about to dispose.
+    scheduler.stop()
     server.close(() => process.exit(0))
     setTimeout(() => process.exit(0), 2_000).unref()
   }
@@ -177,7 +185,7 @@ function main(argv = process.argv.slice(2), env = process.env) {
   // The composed pieces, not just the socket: a test that only had the server
   // could not tell that the registry, the accounts index and the session store
   // are the same ones the login routes were handed.
-  return { server, registry, accounts, sessions }
+  return { server, registry, accounts, sessions, scheduler }
 }
 
 if (require.main === module) main()

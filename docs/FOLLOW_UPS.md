@@ -99,6 +99,13 @@ publishing the consent screen would remove it silently. An
 `OPENFIT_ALLOWED_EMAILS` check would be defence in depth for a self-hosted
 product whose documentation encourages tailnet exposure.
 
-**Sync is on demand only.** Nothing syncs in the background; data refreshes only
-when the renderer calls `POST /api/sync`. A signed-in session that is left open
-does not keep its health data current.
+**Background sync stops when the refresh token lapses.** One scheduled job
+syncs every connected account every ten minutes (`core/scheduler.cjs`). While
+the OAuth consent screen stays in testing mode Google expires refresh tokens
+after seven days, after which every account reports disconnected and the job
+skips it — by design. Signing back in refreshes that account immediately and
+resumes the schedule.
+
+**The scheduler syncs the current day only.** A gap longer than a day — a
+laptop closed over a weekend — leaves those days absent from the archive until
+something requests them. Backfilling missed days is not implemented.

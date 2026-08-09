@@ -150,6 +150,11 @@ async function startBackend(dataDir, options = {}) {
   // bearer-token browser flow; an unauthenticated request for any page is
   // answered with the server-rendered sign-in page.
   startUrl = `${allowedOrigin}/`
+
+  // Only once the socket is up. The timer is unref'd, so it never keeps the
+  // process alive on its own — Electron's own event loop decides that.
+  composed.scheduler.start()
+
   return { ...composed, startUrl }
 }
 
@@ -382,6 +387,9 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  // Before the registry is disposed, so a tick in flight cannot ask it for an
+  // app it is about to tear down.
+  try { backend?.scheduler.stop() } catch { /* never started */ }
   if (httpServer) {
     try { httpServer.close() } catch { /* already closing */ }
     try { httpServer.closeAllConnections() } catch { /* nothing open */ }
