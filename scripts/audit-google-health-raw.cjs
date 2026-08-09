@@ -1,36 +1,100 @@
 'use strict'
 
-const { app, safeStorage } = require('electron')
-const fs = require('node:fs')
-const path = require('node:path')
-const googleHealth = require('../electron/google-health-service.cjs')
+// Reports the *shape* of every Google Health v4 response a sync touches: key
+// paths and value types, never the values themselves, unless `--values` is
+// passed. This is the only thing that can tell us which fields
+// `/users/me/profile` and `/users/me/settings` actually return.
+//
+// Runs under plain Node. It used to require `electron/google-health-service.cjs`
+// — a path the server restructure deleted — and to boot Electron purely to reach
+// `safeStorage`, which fails on a headless host with `Missing X server or
+// $DISPLAY`. `core/secrets.cjs` reads both envelope versions, so a v2 (AES-GCM)
+// credential file written by the server decrypts here with `master.key` alone.
+// A v1 envelope written by the desktop app under `safeStorage` cannot be read
+// without Electron; that case is reported explicitly rather than being mistaken
+// for an empty API.
 
-app.setName('pulseboard-fitbit-desktop')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+const { createSecretStore, KEY_FILE } = require('../core/secrets.cjs')
+const { ACCOUNTS_DIR } = require('../core/accounts.cjs')
+const { defaultDataDir } = require('../server/bin.cjs')
+const googleHealth = require('../core/providers/google-health.cjs')
+
+const CREDENTIAL_FILE = 'credentials.secure.json'
+const CACHE_FILE = 'health-cache.secure.json'
+const LEGACY_APP_DIR = 'pulseboard-fitbit-desktop'
 
 const array = (value) => Array.isArray(value) ? value : []
 const object = (value) => value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 
-function readSecure(file) {
-  const envelope = JSON.parse(fs.readFileSync(file, 'utf8'))
-  if (envelope.encrypted !== true || !safeStorage.isEncryptionAvailable()) throw new Error('Archivio sicuro non disponibile.')
-  return JSON.parse(safeStorage.decryptString(Buffer.from(envelope.data, 'base64')))
+function argumentValue(name) {
+  const prefix = `--${name}=`
+  const match = process.argv.find((argument) => argument.startsWith(prefix))
+  return match ? match.slice(prefix.length) : null
 }
 
-function atomicWrite(file, content) {
-  const temporary = `${file}.${process.pid}.tmp`
-  fs.writeFileSync(temporary, content, { mode: 0o600 })
-  fs.renameSync(temporary, file)
+// Where the desktop app kept its data before the server restructure. Listed so a
+// credential file found there can be named in the report instead of the audit
+// claiming no account exists.
+function legacyDesktopDir() {
+  if (process.platform === 'darwin') return path.join(os.homedir(), 'Library', 'Application Support', LEGACY_APP_DIR)
+  if (process.platform === 'win32') return path.join(process.env.APPDATA || os.homedir(), LEGACY_APP_DIR)
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), LEGACY_APP_DIR)
 }
 
-function writeSecure(file, value) {
-  if (!safeStorage.isEncryptionAvailable()) throw new Error('Archivio sicuro non disponibile.')
-  const serialized = JSON.stringify(value)
-  const envelope = {
-    version: 1,
-    encrypted: true,
-    data: safeStorage.encryptString(serialized).toString('base64'),
+// One instance holds many accounts, each in its own directory under `accounts/`,
+// so the credential file is never at a single fixed path.
+function credentialFiles(dataDir) {
+  const found = []
+  const push = (file) => { if (fs.existsSync(file)) found.push(file) }
+  push(path.join(dataDir, CREDENTIAL_FILE))
+  let entries = []
+  try {
+    entries = fs.readdirSync(path.join(dataDir, ACCOUNTS_DIR), { withFileTypes: true })
+  } catch {
+    entries = []
   }
-  atomicWrite(file, JSON.stringify(envelope))
+  for (const entry of entries) {
+    if (entry.isDirectory()) push(path.join(dataDir, ACCOUNTS_DIR, entry.name, CREDENTIAL_FILE))
+  }
+  push(path.join(legacyDesktopDir(), CREDENTIAL_FILE))
+  return found
+}
+
+// `master.key` is instance-wide and sits at the data directory root, while an
+// account's credential file sits two levels below it.
+function keyDirectoryFor(file) {
+  let dir = path.dirname(file)
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (fs.existsSync(path.join(dir, KEY_FILE))) return dir
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return null
+}
+
+function envelopeVersion(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'))?.version ?? null
+  } catch {
+    return null
+  }
+}
+
+function openCredentials(file) {
+  const version = envelopeVersion(file)
+  if (version === 1) {
+    return { file, credentials: null, store: null, reason: `${file} was written by the desktop app under Electron safeStorage. Reading it needs Electron; sign in through the server to write a v2 envelope this script can read.` }
+  }
+  const keyDir = keyDirectoryFor(file)
+  if (!keyDir) return { file, credentials: null, store: null, reason: `No ${KEY_FILE} was found at or above ${path.dirname(file)}, so ${file} cannot be decrypted.` }
+  const store = createSecretStore({ dir: keyDir })
+  const credentials = store.read(file, null)
+  if (!credentials) return { file, credentials: null, store: null, reason: `${file} could not be decrypted with the ${KEY_FILE} in ${keyDir}.` }
+  return { file, credentials, store, reason: null }
 }
 
 function localIsoToday() {
@@ -46,6 +110,8 @@ function responseName(url) {
   return parsed.pathname.split('/').filter(Boolean).slice(-2).join('/') || parsed.hostname
 }
 
+// Records `path:type`, never `path=value`, so the default output can be pasted
+// into an issue without leaking anybody's health data.
 function collectLeafPaths(value, prefix = '', paths = new Set(), depth = 0) {
   if (depth > 10) return paths
   if (Array.isArray(value)) {
@@ -85,75 +151,139 @@ function recordForDate(items, selector, date) {
   return array(items).find((item) => civilDate(selector(item)?.date) === date) ?? null
 }
 
-app.whenReady().then(async () => {
+async function main() {
+  const dataDir = argumentValue('data-dir') || defaultDataDir(process.env, process.platform)
+  const candidates = credentialFiles(dataDir)
+  if (candidates.length === 0) {
+    console.error(`No ${CREDENTIAL_FILE} was found under ${dataDir} (or the legacy desktop directory). Connect an account first; this audit cannot run without one.`)
+    process.exitCode = 1
+    return
+  }
+
+  const opened = candidates.map(openCredentials)
+  const usable = opened.find((entry) => entry.credentials?.config?.provider === 'google-health' && entry.credentials?.token)
+  if (!usable) {
+    for (const entry of opened) {
+      console.error(entry.reason || `${entry.file} holds no connected Google Health account.`)
+    }
+    process.exitCode = 1
+    return
+  }
+
+  const { file: credentialsPath, credentials, store } = usable
+  let token = credentials.token
+  if (!token.access_token || Number(token.expiresAt || 0) < Date.now() + 90_000) {
+    token = await googleHealth.refreshAccessToken(credentials.config, token)
+  }
+
+  const captures = []
+  const originalFetch = globalThis.fetch.bind(globalThis)
+  globalThis.fetch = async (input, init) => {
+    const response = await originalFetch(input, init)
+    const url = typeof input === 'string' ? input : input.url
+    if (url.startsWith('https://health.googleapis.com/v4/')) {
+      const body = await response.clone().json().catch(() => ({}))
+      captures.push({
+        name: responseName(url),
+        method: init?.method || 'GET',
+        status: response.status,
+        body,
+      })
+    }
+    return response
+  }
+
+  const date = process.argv.find((argument) => /^\d{4}-\d{2}-\d{2}$/.test(argument)) || localIsoToday()
+  let translated
   try {
-    const credentialsPath = path.join(app.getPath('appData'), 'pulseboard-fitbit-desktop', 'credentials.secure.json')
-    const credentials = readSecure(credentialsPath)
-    if (credentials.config?.provider !== 'google-health' || !credentials.token) throw new Error('Google Health non è collegato.')
-
-    let token = credentials.token
-    if (!token.access_token || Number(token.expiresAt || 0) < Date.now() + 90_000) {
-      token = await googleHealth.refreshAccessToken(credentials.config, token)
-    }
-
-    const captures = []
-    const originalFetch = globalThis.fetch.bind(globalThis)
-    globalThis.fetch = async (input, init) => {
-      const response = await originalFetch(input, init)
-      const url = typeof input === 'string' ? input : input.url
-      if (url.startsWith('https://health.googleapis.com/v4/')) {
-        const body = await response.clone().json().catch(() => ({}))
-        captures.push({
-          name: responseName(url),
-          method: init?.method || 'GET',
-          status: response.status,
-          body,
-        })
-      }
-      return response
-    }
-
-    const date = process.argv.find((argument) => /^\d{4}-\d{2}-\d{2}$/.test(argument)) || localIsoToday()
-    const translated = await googleHealth.syncData(token.access_token, date)
+    translated = await googleHealth.syncData(token.access_token, date)
+  } finally {
     globalThis.fetch = originalFetch
+  }
 
-    let cacheUpdated = false
-    if (process.argv.includes('--update-cache')) {
-      const total = Number(translated.requestStats?.total || 0)
-      const succeeded = Number(translated.requestStats?.succeeded || 0)
-      const successfulKeys = array(translated.requestStats?.successfulKeys)
-      const minimumUsefulResponses = Math.max(3, Math.ceil(total * 0.2))
-      const measurementKeys = ['stepsDaily', 'caloriesDaily', 'distanceDaily', 'activeMinutesDaily', 'zoneMinutesDaily', 'weightDaily', 'waterDaily', 'nutritionDaily', 'heartIntradayRaw', 'restingHeartRaw', 'hrvRaw', 'spo2Raw', 'breathingRaw', 'skinTemperatureRaw', 'cardioRaw', 'sleepRaw', 'activitiesRaw', 'ecgRaw', 'irnAlertsRaw', 'glucoseRaw']
-      const hasMeasurementResponse = successfulKeys.some((key) => measurementKeys.includes(key))
-      if (!total || succeeded < minimumUsefulResponses || !hasMeasurementResponse) {
-        throw new Error('La sincronizzazione non ha restituito abbastanza sorgenti valide. La cache precedente è stata conservata.')
-      }
-
-      const cachePath = path.join(path.dirname(credentialsPath), 'health-cache.secure.json')
-      writeSecure(cachePath, translated)
-      writeSecure(credentialsPath, { ...credentials, token, lastSyncAt: translated.generatedAt })
-      cacheUpdated = true
+  let cacheUpdated = false
+  if (process.argv.includes('--update-cache')) {
+    const total = Number(translated.requestStats?.total || 0)
+    const succeeded = Number(translated.requestStats?.succeeded || 0)
+    const successfulKeys = array(translated.requestStats?.successfulKeys)
+    const minimumUsefulResponses = Math.max(3, Math.ceil(total * 0.2))
+    const measurementKeys = ['stepsDaily', 'caloriesDaily', 'distanceDaily', 'activeMinutesDaily', 'zoneMinutesDaily', 'weightDaily', 'waterDaily', 'nutritionDaily', 'heartIntradayRaw', 'restingHeartRaw', 'hrvRaw', 'spo2Raw', 'breathingRaw', 'skinTemperatureRaw', 'cardioRaw', 'sleepRaw', 'activitiesRaw', 'ecgRaw', 'irnAlertsRaw', 'glucoseRaw']
+    const hasMeasurementResponse = successfulKeys.some((key) => measurementKeys.includes(key))
+    if (!total || succeeded < minimumUsefulResponses || !hasMeasurementResponse) {
+      throw new Error('The sync did not return enough valid sources. The previous cache was kept.')
     }
 
-    const sleepPoints = dataPoints(captures, 'sleep')
-    const exercisePoints = dataPoints(captures, 'exercise')
-    const activeMinutes = rollupPoints(captures, 'active-minutes')
-    const zoneMinutes = rollupPoints(captures, 'active-zone-minutes')
-    const hrvPoints = dataPoints(captures, 'daily-heart-rate-variability')
-    const oxygenPoints = dataPoints(captures, 'daily-oxygen-saturation')
-    const respiratoryPoints = dataPoints(captures, 'daily-respiratory-rate')
-    const skinTemperaturePoints = dataPoints(captures, 'daily-sleep-temperature-derivations')
+    store.write(path.join(path.dirname(credentialsPath), CACHE_FILE), translated)
+    store.write(credentialsPath, { ...credentials, token, lastSyncAt: translated.generatedAt })
+    cacheUpdated = true
+  }
 
-    const groupedResponses = new Map()
-    for (const capture of captures) {
-      const current = groupedResponses.get(capture.name) || { name: capture.name, pages: 0, dataPoints: 0, rollupDataPoints: 0, fields: new Set() }
-      current.pages += 1
-      current.dataPoints += array(capture.body.dataPoints).length
-      current.rollupDataPoints += array(capture.body.rollupDataPoints).length
-      collectLeafPaths(capture.body).forEach((field) => current.fields.add(field))
-      groupedResponses.set(capture.name, current)
-    }
+  const sleepPoints = dataPoints(captures, 'sleep')
+  const exercisePoints = dataPoints(captures, 'exercise')
+  const activeMinutes = rollupPoints(captures, 'active-minutes')
+  const zoneMinutes = rollupPoints(captures, 'active-zone-minutes')
+  const hrvPoints = dataPoints(captures, 'daily-heart-rate-variability')
+  const oxygenPoints = dataPoints(captures, 'daily-oxygen-saturation')
+  const respiratoryPoints = dataPoints(captures, 'daily-respiratory-rate')
+  const skinTemperaturePoints = dataPoints(captures, 'daily-sleep-temperature-derivations')
 
+  const groupedResponses = new Map()
+  for (const capture of captures) {
+    const current = groupedResponses.get(capture.name) || { name: capture.name, pages: 0, dataPoints: 0, rollupDataPoints: 0, fields: new Set() }
+    current.pages += 1
+    current.dataPoints += array(capture.body.dataPoints).length
+    current.rollupDataPoints += array(capture.body.rollupDataPoints).length
+    collectLeafPaths(capture.body).forEach((field) => current.fields.add(field))
+    groupedResponses.set(capture.name, current)
+  }
+
+  const responseGroups = [...groupedResponses.values()].map((group) => ({
+    name: group.name,
+    pages: group.pages,
+    dataPoints: group.dataPoints,
+    rollupDataPoints: group.rollupDataPoints,
+    fieldCount: group.fields.size,
+  })).sort((left, right) => left.name.localeCompare(right.name))
+
+  const rawResponseShapes = captures
+    .map((capture) => ({
+      name: capture.name,
+      method: capture.method,
+      status: capture.status,
+      dataPoints: array(capture.body.dataPoints).length,
+      rollupDataPoints: array(capture.body.rollupDataPoints).length,
+      topLevelFields: Object.keys(object(capture.body)).sort(),
+      leafPaths: [...collectLeafPaths(capture.body)].sort(),
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name))
+
+  // What Tasks 2-4 are waiting on: whether any response carries a goal, a
+  // height, or a date of birth at all. Field names only.
+  const profileShapeCandidates = [...new Set(rawResponseShapes
+    .flatMap((response) => response.leafPaths)
+    .filter((leaf) => /goal|target|height|birth|stride|weight|age|gender|locale|timezone|units/i.test(leaf)))].sort()
+
+  const report = {
+    date,
+    dataDir,
+    credentialFile: credentialsPath,
+    cacheUpdated,
+    requests: {
+      expected: translated.requestStats.total,
+      succeeded: translated.requestStats.succeeded,
+      failed: translated.errors.map((error) => ({ key: error.key, status: error.status ?? null })),
+      capturedGoogleResponses: captures.length,
+    },
+    nonEmptyResponses: responseGroups.filter((group) => group.dataPoints || group.rollupDataPoints || group.fieldCount),
+    emptyResponses: responseGroups.filter((group) => !group.dataPoints && !group.rollupDataPoints && !group.fieldCount).map((group) => group.name),
+    rawResponseShapes,
+    profileShapeCandidates,
+    translatedEndpointShape: [...collectLeafPaths(object(translated.endpoints))].sort(),
+  }
+
+  // Values are opt-in. The default output is safe to paste into an issue or a
+  // commit message; this branch is not.
+  if (process.argv.includes('--values')) {
     const currentSleep = sleepPoints.find((point) => point.sleep?.interval?.endTime?.slice(0, 10) === date) ?? null
     const currentHrv = recordForDate(hrvPoints, (point) => point.dailyHeartRateVariability, date)
     const currentOxygen = recordForDate(oxygenPoints, (point) => point.dailyOxygenSaturation, date)
@@ -162,25 +292,7 @@ app.whenReady().then(async () => {
     const currentActiveMinutes = activeMinutes.find((point) => civilDate(point.civilStartTime) === date) ?? null
     const currentZoneMinutes = zoneMinutes.find((point) => civilDate(point.civilStartTime) === date) ?? null
 
-    const responseGroups = [...groupedResponses.values()].map((group) => ({
-      name: group.name,
-      pages: group.pages,
-      dataPoints: group.dataPoints,
-      rollupDataPoints: group.rollupDataPoints,
-      fieldCount: group.fields.size,
-    })).sort((left, right) => left.name.localeCompare(right.name))
-
-    const summary = {
-      date,
-      cacheUpdated,
-      requests: {
-        jobs: translated.requestStats.total,
-        succeeded: translated.requestStats.succeeded,
-        failed: translated.errors.length,
-        httpResponses: captures.length,
-      },
-      nonEmptyResponses: responseGroups.filter((group) => group.dataPoints || group.rollupDataPoints || group.fieldCount),
-      emptyResponses: responseGroups.filter((group) => !group.dataPoints && !group.rollupDataPoints && !group.fieldCount).map((group) => group.name),
+    report.values = {
       currentRawValues: {
         sleep: currentSleep ? {
           type: currentSleep.sleep?.type ?? null,
@@ -195,50 +307,9 @@ app.whenReady().then(async () => {
         respiratoryRate: object(currentRespiratory?.dailyRespiratoryRate),
         skinTemperature: object(currentSkinTemperature?.dailySleepTemperatureDerivations),
       },
-      implementedRawFieldCoverage: {
-        sleepStageTimelineSegments: array(currentSleep?.sleep?.stages).length,
-        sleepStageTransitionCounts: array(currentSleep?.sleep?.summary?.stagesSummary).map((stage) => ({ type: stage.type, count: stage.count })),
-        minutesToFallAsleep: currentSleep?.sleep?.summary?.minutesToFallAsleep ?? null,
-        minutesAfterWakeUp: currentSleep?.sleep?.summary?.minutesAfterWakeUp ?? null,
-        hrvDeepSleepRmssd: currentHrv?.dailyHeartRateVariability?.deepSleepRootMeanSquareOfSuccessiveDifferencesMilliseconds ?? null,
-        hrvEntropy: currentHrv?.dailyHeartRateVariability?.entropy ?? null,
-        nonRemHeartRate: currentHrv?.dailyHeartRateVariability?.nonRemHeartRateBeatsPerMinute ?? null,
-        oxygenLowerBound: currentOxygen?.dailyOxygenSaturation?.lowerBoundPercentage ?? null,
-        oxygenUpperBound: currentOxygen?.dailyOxygenSaturation?.upperBoundPercentage ?? null,
-        skinNightlyTemperature: currentSkinTemperature?.dailySleepTemperatureDerivations?.nightlyTemperatureCelsius ?? null,
-        skinBaselineTemperature: currentSkinTemperature?.dailySleepTemperatureDerivations?.baselineTemperatureCelsius ?? null,
-        skinRelativeStddev30d: currentSkinTemperature?.dailySleepTemperatureDerivations?.relativeNightlyStddev30dCelsius ?? null,
-        exerciseSteps: exercisePoints.map((point) => point.exercise?.metricsSummary?.steps ?? null),
-        exerciseAveragePaceSecondsPerMeter: exercisePoints.map((point) => point.exercise?.metricsSummary?.averagePaceSecondsPerMeter ?? null),
-        exerciseHeartRateZoneDurations: exercisePoints.map((point) => object(point.exercise?.metricsSummary?.heartRateZoneDurations)),
-      },
-    }
-
-    if (process.argv.includes('--summary')) {
-      console.log(JSON.stringify(summary, null, 2))
-      app.quit()
-      return
-    }
-
-    const report = {
-      date,
-      requests: {
-        expected: translated.requestStats.total,
-        succeeded: translated.requestStats.succeeded,
-        failed: translated.errors.map((error) => ({ key: error.key, status: error.status ?? null })),
-        capturedGoogleResponses: captures.length,
-      },
-      rawResponseInventory: captures
-        .map((capture) => ({
-          name: capture.name,
-          method: capture.method,
-          status: capture.status,
-          dataPoints: array(capture.body.dataPoints).length,
-          rollupDataPoints: array(capture.body.rollupDataPoints).length,
-          topLevelFields: Object.keys(object(capture.body)).sort(),
-          leafPaths: [...collectLeafPaths(capture.body)].sort(),
-        }))
-        .sort((left, right) => left.name.localeCompare(right.name)),
+      profileResponses: captures
+        .filter((capture) => /profile|settings/i.test(capture.name))
+        .map((capture) => ({ name: capture.name, body: capture.body })),
       rawHighlights: {
         sleep: sleepPoints.map((point) => ({
           pointFields: Object.keys(object(point)).sort(),
@@ -261,13 +332,25 @@ app.whenReady().then(async () => {
         respiratoryRate: respiratoryPoints.map((point) => object(point.dailyRespiratoryRate)),
         skinTemperature: skinTemperaturePoints.map((point) => object(point.dailySleepTemperatureDerivations)),
       },
-      summary,
     }
-
-    console.log(JSON.stringify(report, null, 2))
-    app.quit()
-  } catch (error) {
-    console.error(error.stack || error.message)
-    app.exit(1)
   }
+
+  if (process.argv.includes('--summary')) {
+    console.log(JSON.stringify({
+      date: report.date,
+      cacheUpdated: report.cacheUpdated,
+      requests: report.requests,
+      nonEmptyResponses: report.nonEmptyResponses,
+      emptyResponses: report.emptyResponses,
+      profileShapeCandidates: report.profileShapeCandidates,
+    }, null, 2))
+    return
+  }
+
+  console.log(JSON.stringify(report, null, 2))
+}
+
+main().catch((error) => {
+  console.error(error.stack || error.message)
+  process.exitCode = 1
 })
