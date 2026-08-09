@@ -71,7 +71,9 @@ function createApp(options = {}) {
   })
   agents.prefer(credentials.read().config.agentId)
 
-  const syncer = createSyncer({
+  // Injectable on the same footing as `secrets`, so a test can drive the paths
+  // that run after a sync returns without standing up a provider and a token.
+  const syncer = options.syncer || createSyncer({
     credentials,
     onProgress: (progress) => events.emit('sync-progress', progress),
   })
@@ -86,15 +88,33 @@ function createApp(options = {}) {
   // Field names in the v4 profile response are unverified — the audit in Task 1
   // could not run. Map defensively: anything unrecognized is simply absent, and
   // every field stays editable by hand, so a wrong guess costs nothing.
-  function prefillFromProvider(payload) {
-    const user = payload?.endpoints?.profileRaw?.user
+  /**
+   * Fills profile fields the user has not typed, from what the provider returned.
+   *
+   * Field names here are not guessed. The audit against a live Google Health v4
+   * account showed `/users/me/profile` carries `age` as a number and carries
+   * neither `dateOfBirth` nor `height`, so age is the only prefillable fact —
+   * height has no provider source at all and has to be asked for. The legacy
+   * Fitbit nesting (`profileRaw.user`) and the flat Google shape are both read.
+   *
+   * The store refuses to overwrite a user edit, so this is safe on every sync.
+   */
+  function prefillFromProvider(payload, referenceDate) {
+    const raw = payload?.endpoints?.profileRaw
+    const user = (raw && typeof raw === 'object' && typeof raw.user === 'object' && raw.user) || raw
     if (!user || typeof user !== 'object') return
-    userProfile.save({
-      heightCm: user.height ?? null,
-      birthYear: typeof user.dateOfBirth === 'string' && /^\d{4}/.test(user.dateOfBirth)
-        ? Number(user.dateOfBirth.slice(0, 4))
-        : null,
-    }, { source: 'provider' })
+
+    const age = Number(user.age)
+    // A birth year is only as precise as the age is: someone aged 36 was born in
+    // one of two years. Recording the later one keeps the Tanaka estimate within
+    // 0.7 bpm, which is far inside the estimate's own error.
+    const referenceYear = Number(String(referenceDate).slice(0, 4))
+    const birthYear = Number.isFinite(age) && age > 0 && age < 130 && Number.isFinite(referenceYear)
+      ? referenceYear - Math.round(age)
+      : null
+
+    if (birthYear === null) return
+    userProfile.save({ birthYear }, { source: 'provider' })
   }
 
   const assistant = {
@@ -239,7 +259,7 @@ function createApp(options = {}) {
         // A malformed profile response must never fail a sync that otherwise
         // succeeded, so the prefill is advisory and its failure is swallowed.
         try {
-          prefillFromProvider(payload)
+          prefillFromProvider(payload, payload?.date || requested)
         } catch {
           /* the profile stays exactly as it was */
         }

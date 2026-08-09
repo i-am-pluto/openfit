@@ -184,3 +184,48 @@ describe('adoptToken', () => {
     }
   })
 })
+
+describe('profile prefill from the provider', () => {
+  // The field names here are not invented. An audit against a live Google Health
+  // v4 account showed /users/me/profile carries `age` as a number and carries
+  // neither `dateOfBirth` nor `height`.
+  function appWithSync(payload: Record<string, any>) {
+    const secrets = fakeSecrets({
+      [CREDENTIAL_FILE]: { config: { provider: 'google-health' }, token: { access_token: 'a' }, lastSyncAt: null },
+    })
+    const app = makeApp({ secrets, syncer: async () => payload })
+    return { app, secrets }
+  }
+
+  it('derives a birth year from the age the provider reports', async () => {
+    const { app } = appWithSync({ date: '2026-08-09', endpoints: { profileRaw: { age: 36 } }, errors: [] })
+    await app.sync('2026-08-09')
+    expect(app.getProfile().birthYear).toBe(1990)
+  })
+
+  it('reads the legacy Fitbit nesting as well as the flat Google shape', async () => {
+    const { app } = appWithSync({ date: '2026-08-09', endpoints: { profileRaw: { user: { age: 36 } } }, errors: [] })
+    await app.sync('2026-08-09')
+    expect(app.getProfile().birthYear).toBe(1990)
+  })
+
+  it('never overwrites a birth year the user typed', async () => {
+    const { app } = appWithSync({ date: '2026-08-09', endpoints: { profileRaw: { age: 36 } }, errors: [] })
+    app.saveProfile({ birthYear: 1985 })
+    await app.sync('2026-08-09')
+    expect(app.getProfile().birthYear).toBe(1985)
+  })
+
+  it('leaves the profile untouched when the provider sends no age', async () => {
+    const { app } = appWithSync({ date: '2026-08-09', endpoints: { profileRaw: { name: 'Someone' } }, errors: [] })
+    await app.sync('2026-08-09')
+    expect(app.getProfile().birthYear).toBeNull()
+  })
+
+  it('does not fail the sync when the profile response is malformed', async () => {
+    const payload = { date: '2026-08-09', endpoints: { profileRaw: 'unexpected' }, errors: [] }
+    const { app } = appWithSync(payload)
+    await expect(app.sync('2026-08-09')).resolves.toEqual(payload)
+    expect(app.getProfile().birthYear).toBeNull()
+  })
+})
