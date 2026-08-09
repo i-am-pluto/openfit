@@ -116,6 +116,41 @@ function idToken(claims: Record<string, unknown>) {
 const cookieValue = (response: Response, name: string) =>
   response.headers.getSetCookie().map((entry) => entry.split(';')[0]).find((pair) => pair.startsWith(`${name}=`)) ?? ''
 
+/**
+ * Drives a whole Google sign-in against the composed server and hands back the
+ * cookie the callback issued.
+ *
+ * Nothing used that cookie before: this file matched its prefix and stopped, so
+ * the `epoch` claim it carries was unpinned — deleting it shipped green while
+ * signing every user out the instant they signed in.
+ */
+async function signIn(origin: string, { sub, email }: { sub: string; email: string }) {
+  const login = await fetch(`${origin}/auth/login`, { redirect: 'manual' })
+  const authorize = new URL(String(login.headers.get('location')))
+  const pending = cookieValue(login, 'openfit_pending')
+
+  stubGoogleTokenEndpoint({
+    access_token: 'access-1',
+    refresh_token: 'refresh-1',
+    expires_in: 3600,
+    id_token: idToken({
+      iss: 'https://accounts.google.com',
+      aud: 'test-client',
+      nonce: authorize.searchParams.get('nonce'),
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      sub,
+      email,
+      email_verified: true,
+    }),
+  })
+
+  const callback = await fetch(
+    `${origin}/auth/callback?code=auth-code&state=${authorize.searchParams.get('state')}`,
+    { redirect: 'manual', headers: { cookie: pending } },
+  )
+  return { callback, cookie: cookieValue(callback, 'openfit_session') }
+}
+
 describe('server entry point', () => {
   it('serves the login page to an anonymous visitor', async () => {
     const { origin } = await start()
@@ -224,6 +259,50 @@ describe('server entry point', () => {
 
     // Requirement 9: the renderer's live update has a publisher again.
     expect(announced).toEqual([{ ok: true }])
+  })
+
+  it('issues a session cookie that authenticates the very next request', async () => {
+    const { origin } = await start()
+    const { callback, cookie } = await signIn(origin, { sub: 'google-sub-1', email: 'ada@example.com' })
+
+    expect(callback.status).toBe(302)
+    expect(cookie).toMatch(/^openfit_session=v1\./)
+
+    // Every claim in that cookie has to be right for this to be a 200: `sub`
+    // names the account, and `epoch` has to match the stored one, which is what
+    // makes revocation mean anything.
+    const status = await fetch(`${origin}/api/status`, { headers: { cookie } })
+    expect(status.status).toBe(200)
+    expect(await status.json()).toMatchObject({ hasBackend: true })
+  })
+
+  it('stops a second, independently issued cookie after a sign-out everywhere', async () => {
+    const { origin } = await start()
+    const identity = { sub: 'google-sub-1', email: 'ada@example.com' }
+    const first = await signIn(origin, identity)
+
+    // A whole second, so the two cookies differ in their signed `iat` and the
+    // one being revoked is provably not the one used to sign out. Anything less
+    // and both callbacks could mint the same bytes.
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    const second = await signIn(origin, identity)
+
+    expect(second.cookie).not.toBe(first.cookie)
+    expect((await fetch(`${origin}/api/status`, { headers: { cookie: second.cookie } })).status).toBe(200)
+
+    const loggedOut = await fetch(`${origin}/auth/logout`, {
+      method: 'POST',
+      headers: { cookie: first.cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ everywhere: true }),
+    })
+    expect(await loggedOut.json()).toEqual({ ok: true, revoked: true })
+
+    // The only end-to-end proof that "log out everywhere" reaches a session it
+    // was not sent from: server/routes.test.ts stubs bumpEpoch, and nothing else
+    // watches a real cookie stop working.
+    const after = await fetch(`${origin}/api/status`, { headers: { cookie: second.cookie } })
+    expect(after.status).toBe(401)
+    expect((await after.json()).error).toBe('The session has been revoked.')
   })
 
   it('signs its session cookies with the instance master key', async () => {
