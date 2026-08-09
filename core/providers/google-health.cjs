@@ -9,6 +9,7 @@ const REVOKE_URL = 'https://oauth2.googleapis.com/revoke'
 const SCOPES = [
   'openid',
   'profile',
+  'email',
   'https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly',
   'https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly',
   'https://www.googleapis.com/auth/googlehealth.ecg.readonly',
