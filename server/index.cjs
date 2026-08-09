@@ -139,8 +139,11 @@ function createServer({ app, staticRoot, token, dataDir }) {
     }
 
     if (serveStatic(url.pathname, response)) return
-    // Single-page app: unknown paths fall back to the shell.
-    if (serveStatic('/index.html', response)) return
+
+    // Unknown navigations fall back to the app shell, but a request that names a
+    // file must 404. Answering a missing .js with HTML produces a blank page
+    // under `nosniff` instead of a legible error.
+    if (!path.extname(url.pathname) && serveStatic('/index.html', response)) return
 
     securityHeaders(response)
     response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
