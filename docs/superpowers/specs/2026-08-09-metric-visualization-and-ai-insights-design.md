@@ -23,6 +23,10 @@ than to recommend.
    produce actionable improvements rather than descriptions.
 5. Collect the small set of user profile facts that unlock analysis the
    provider cannot supply.
+6. Treat cardio load, strain, and recovery as a first-class metric family, built
+   from published formulas whose inputs stay visible.
+7. Render the assistant's markdown as markdown, and instruct it to write for the
+   surface it is actually displayed on.
 
 ## Non-Goals
 
@@ -31,7 +35,15 @@ than to recommend.
   and every view, and is worth its own spec.
 - Any proprietary composite score. `docs/HOME_DASHBOARD_MODEL.md` forbids it and
   this design upholds that: every number traces to a measurement, an explicit
-  goal, or a visible personal baseline.
+  goal, or a visible personal baseline. Section 6 admits two published
+  composites — Edwards TRIMP and ACWR — under the three constraints stated
+  there; it invents none, and it produces no single "recovery score".
+- Machine-learned models trained on the user's data. "AI algorithms" here means
+  published statistical methods computed locally plus a language model reasoning
+  over their output. Nothing is trained, and no health data leaves the host.
+- Historical backfill of the archive beyond what the scheduler has collected.
+  Deferred; the 28-day windows in section 6 fill in over time and state their
+  real day count until they do.
 - Component-level DOM tests. The project has no jsdom or testing-library
   dependency and no component tests; this design does not introduce that
   convention.
@@ -314,6 +326,94 @@ locally and render with Codex absent. Only the seeded-prompt action and the
 narrative require the assistant, and it is already gated on
 `status.available && status.authenticated`.
 
+### 6. Cardio load, strain, and recovery
+
+**Why these are composites, and how they stay honest.** `HOME_DASHBOARD_MODEL.md`
+forbids invented composite scores, and strain and stress are composites. Each one
+here therefore has to satisfy three rules: name a published formula, show its
+inputs on the same screen, and report in that formula's own documented unit —
+never a 0-100 scale OpenFit made up. A composite that cannot meet all three is
+not shipped.
+
+**Cardio load (strain).** Edwards' summated heart-rate-zone TRIMP:
+`load = sum(minutes_in_zone_i * i)` for `i = 1..4` over light, moderate,
+vigorous, and peak. The inputs come from `activities[].heartZoneMinutes`, which
+the provider already supplies per workout as true minutes — no intraday
+re-bucketing, so none of the sampling artefact that made a minutes-per-zone
+figure unsound elsewhere in this document. Days with no recorded workout fall
+back to the daily Active Zone Minutes total, flagged on screen as the coarser
+source. The unit is TRIMP points and is labelled as such.
+
+**Acute:chronic workload ratio.** `ACWR = 7-day mean load / 28-day mean load`,
+rendered with both windows and their day counts visible. Below 14 chronic days it
+is suppressed outright in favour of an explicit "chronic load needs 28 days of
+history; 11 recorded" note, because a ratio computed against a half-filled window
+is worse than no ratio. The archive in `core/health-cache.cjs` is unbounded and
+never pruned, so the window fills in as the ten-minute scheduler runs. Historical
+backfill remains unimplemented and stays deferred.
+
+**Recovery.** No single score. A panel of four independent deviations from the
+user's own trailing 28-day baseline, each in its native unit with the baseline
+printed beside it: HRV (RMSSD), resting heart rate, respiratory rate, and skin
+temperature delta — the last already arriving as a deviation. Sleep efficiency
+joins as context. Nothing is summed. Whether these four agree or disagree on a
+given morning is precisely the information a single number would destroy, and it
+is the thing worth showing.
+
+**Cardio fitness.** The `vo2Max` / `cardioScore` trend against its 28-day
+baseline, the resting-heart-rate trend, and the heart-rate-zone distribution
+histogram from section 3.
+
+**Where AI enters.** Everything above is computed locally and renders with no
+assistant present. The assistant reads these figures from the context block and
+does the part statistics cannot: reconciling signals that disagree, weighing them
+against what the user recorded in the profile, and proposing one specific change
+with a horizon and the view that will confirm whether it worked. Three rules in
+`insight-engine.ts` cover it — load spike (ACWR above 1.5), sustained
+undertraining (ACWR below 0.8 across seven days), and multi-signal strain (two or
+more recovery deviations beyond 1.5 z on the same day).
+
+### 7. Assistant markdown
+
+**Rendering.** `MessagePrimitive.Parts` renders text parts verbatim today, so
+every heading, list, table, and bold span Claude Code emits reaches the user as
+literal syntax. A `MarkdownText` component built on `react-markdown` and
+`remark-gfm` is passed as `components={{ Text: MarkdownText }}`.
+
+`@assistant-ui/react-markdown` is deliberately not used: at 0.14.10 it peers on
+`@assistant-ui/react ^0.15.0` while this app pins 0.14.23, so adopting it forces
+a runtime major bump mid-branch and buys no capability the two direct
+dependencies do not already provide.
+
+**Safety.** `react-markdown` does not render raw HTML unless `rehype-raw` is
+added, and it is not added. The `<!-- openfit:navigate -->` directive therefore
+cannot reach the DOM even if `stripAssistantNavigation` were to miss it; the
+strip stays the primary control and this is the second. Link targets are
+restricted to `http:` and `https:` through `urlTransform`, and anything else
+renders as plain text. Assistant output is derived from health data and is
+treated as untrusted input throughout.
+
+**Streaming.** An unterminated code fence mid-stream swallows the rest of the
+response into a code block until its closing fence arrives.
+`stabilizeStreamingMarkdown` appends a synthetic closing fence when the fence
+count is odd — a pure function over the visible text, applied only to in-flight
+deltas and never to the settled final message.
+
+**Prompt.** `HEALTH_ASSISTANT_DEVELOPER_INSTRUCTIONS` currently instructs
+"concise plain text", which actively fights the renderer being added. It is
+replaced by a formatting contract written for a narrow sidebar: GitHub-flavored
+markdown; the answer first and the evidence second; `##` as the deepest heading;
+bullets rather than prose whenever more than one item is being compared; tables
+only at three columns or fewer and bullets beyond that; bold reserved for the one
+number carrying the answer; no code fences except when quoting raw data. This
+merges with the recommendation requirement from section 5 into the single shared
+constant that serves both backends.
+
+**Styling.** `.assistant-ai-message` gains element styles in `src/styles.css` for
+headings, lists, tables, and inline code, with tables inside an
+`overflow-x: auto` wrapper so a wide table scrolls itself rather than the
+sidebar.
+
 ## Testing
 
 | File | Covers |
@@ -321,6 +421,9 @@ narrative require the assistant, and it is already gated on
 | `src/lib/metric-analysis.test.ts` | Pearson against known values; null on zero variance; null below the sample floor; null gaps skipped rather than zero-filled; anomaly windowing excludes the point under test; ISO week boundaries including year rollover; histogram edges including a single-value series; Karvonen zones null without max HR |
 | `src/lib/insight-engine.test.ts` | Each rule fires on data that warrants it and stays silent otherwise; evidence sample counts are accurate; deterministic ordering; severity ranking; absent is never reported as zero |
 | `src/components/analysis-chart-geometry.test.ts` | Regression line endpoints; heatmap cell placement; stack offsets summing to the total; band path bounds; diverging layout across the zero baseline |
+| `src/lib/cardio-load.test.ts` | Edwards TRIMP against hand-computed zone minutes; the Active Zone Minutes fallback is flagged and never silently mixed with workout-derived load; ACWR arithmetic; suppression below 14 chronic days reports the real day count; a zero chronic mean yields null rather than infinity |
+| `src/lib/recovery-panel.test.ts` | Each deviation is computed against its own baseline and never against another metric's; an absent signal drops out of the panel instead of reading zero; the baseline window reports its true sample count |
+| `src/lib/assistant-markdown.test.ts` | `stabilizeStreamingMarkdown` closes an odd fence count and leaves balanced text untouched; a navigation directive never survives into rendered output; non-http schemes are refused by the URL transform |
 | `src/lib/health-assistant.test.ts` (extended) | The analysis block is present, null-compacted, and free of credentials |
 | `src/lib/user-profile.test.ts` | Tanaka estimate; measured value overrides the estimate; BMI derivation; provider goals outrank profile fallbacks; a user edit is not overwritten by a later sync; all-null profile degrades cleanly |
 | `server/routes.test.ts` (extended) | `GET` and `POST /api/profile` round-trip, reject malformed bodies, and fail explicitly when the secret store is unavailable |
