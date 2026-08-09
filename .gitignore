@@ -7,3 +7,4 @@ screenshots/
 .DS_Store
 *.tsbuildinfo
 .dev-data/
+.env
