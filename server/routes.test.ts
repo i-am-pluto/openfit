@@ -190,6 +190,47 @@ describe('server routes', () => {
     expect((await call('/api/nope')).status).toBe(404)
   })
 
+  it('404s a missing asset instead of answering it with the shell', async () => {
+    const { call } = await withServer(stubApp())
+
+    // Serving HTML for a missing .js yields a blank page under nosniff rather
+    // than a legible failure, so anything with a file extension must 404.
+    for (const pathname of ['/assets/index-abc123.js', '/assets/gone.css', '/assets/font.woff2']) {
+      const response = await call(pathname)
+      expect(response.status).toBe(404)
+      expect(response.headers.get('content-type')).not.toContain('text/html')
+    }
+  })
+
+  it('serves real assets with their own content type', async () => {
+    const app = stubApp()
+    const staticRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'openfit-dist-'))
+    fs.mkdirSync(path.join(staticRoot, 'assets'))
+    fs.writeFileSync(path.join(staticRoot, 'index.html'), 'SHELL')
+    fs.writeFileSync(path.join(staticRoot, 'assets', 'app.js'), 'export default 1')
+    fs.writeFileSync(path.join(staticRoot, 'assets', 'app.css'), '.a{}')
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openfit-data-'))
+
+    const { server, token } = createServer({ app, staticRoot, dataDir, token: 'test-token' })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    cleanups.push(() => {
+      server.close()
+      fs.rmSync(staticRoot, { recursive: true, force: true })
+      fs.rmSync(dataDir, { recursive: true, force: true })
+    })
+
+    const base = `http://127.0.0.1:${server.address().port}`
+    const headers = { authorization: `Bearer ${token}` }
+
+    const js = await fetch(`${base}/assets/app.js`, { headers })
+    expect(js.status).toBe(200)
+    expect(js.headers.get('content-type')).toContain('text/javascript')
+
+    const css = await fetch(`${base}/assets/app.css`, { headers })
+    expect(css.status).toBe(200)
+    expect(css.headers.get('content-type')).toContain('text/css')
+  })
+
   it('does not mount the OAuth callback unless a public origin is configured', async () => {
     const withoutOrigin = await withServer(stubApp())
     expect(await (await withoutOrigin.call('/oauth/callback?code=x')).text()).toContain('SHELL')
