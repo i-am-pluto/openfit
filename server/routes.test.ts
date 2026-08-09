@@ -26,8 +26,7 @@ function stubApp(overrides: Record<string, any> = {}) {
     events,
     dataDir: '/mock',
     getStatus: vi.fn(() => ({ hasBackend: true, configured: false, provider: 'google-health' })),
-    saveConfig: vi.fn((config: any) => ({ hasBackend: true, configured: true, clientId: config.clientId })),
-    connect: vi.fn(async () => ({ ok: true, authorizationUrl: 'https://accounts.example/auth' })),
+    connect: vi.fn(async () => ({ reauthorizeUrl: '/auth/login?prompt=consent' })),
     disconnect: vi.fn(async () => ({ hasBackend: true, connected: false })),
     sync: vi.fn(async () => ({ date: '2026-08-09' })),
     getCachedData: vi.fn(() => null),
@@ -152,14 +151,11 @@ describe('server routes', () => {
     expect((await fetch(base + '/api/status', { headers: { authorization: 'Bearer wrong' } })).status).toBe(401)
   })
 
-  it('serves status, config, and sync through the core app', async () => {
+  it('serves status and sync through the core app', async () => {
     const app = stubApp()
     const { call } = await withServer(app)
 
     expect(await (await call('/api/status')).json()).toMatchObject({ hasBackend: true })
-
-    await call('/api/config', { method: 'POST', body: JSON.stringify({ clientId: 'abc' }) })
-    expect(app.saveConfig).toHaveBeenCalledWith({ clientId: 'abc' })
 
     await call('/api/sync', { method: 'POST', body: JSON.stringify({ date: '2026-08-09' }) })
     expect(app.sync).toHaveBeenCalledWith('2026-08-09')
@@ -176,12 +172,12 @@ describe('server routes', () => {
     expect(await response.json()).toEqual({ error: 'A sync is already in progress.' })
   })
 
-  it('tells connect whether the caller reached it over loopback', async () => {
+  it('calls connect with nothing: there is no per-caller reconnect variant left', async () => {
     const app = stubApp()
     const { call } = await withServer(app)
 
     await call('/api/connect', { method: 'POST', body: '{}' })
-    expect(app.connect).toHaveBeenCalledWith({ fromLoopback: true })
+    expect(app.connect).toHaveBeenCalledWith()
   })
 
   it('serves the archive as a download', async () => {
@@ -310,8 +306,41 @@ describe('server routes', () => {
 
   it('rejects an oversized request body', async () => {
     const { call } = await withServer(stubApp())
-    const response = await call('/api/config', { method: 'POST', body: JSON.stringify({ clientId: 'x'.repeat(2 * 1024 * 1024) }) })
+    const response = await call('/api/sync', { method: 'POST', body: JSON.stringify({ date: 'x'.repeat(2 * 1024 * 1024) }) })
     expect(response.status).toBe(413)
+  })
+})
+
+describe('retired configuration surface', () => {
+  it('no longer exposes POST /api/config', async () => {
+    const { base, sessionCookie } = await withServer(stubApp())
+    const response = await fetch(`${base}/api/config`, {
+      method: 'POST',
+      headers: { cookie: sessionCookie, 'content-type': 'application/json' },
+      body: '{}',
+    })
+
+    expect(response.status).toBe(404)
+  })
+
+  it('returns a reauthorize url from /api/connect rather than a redirect', async () => {
+    const app = stubApp({ connect: vi.fn(async () => ({ reauthorizeUrl: '/auth/login?prompt=consent' })) })
+    const { base, sessionCookie } = await withServer(app)
+
+    const response = await fetch(`${base}/api/connect`, { method: 'POST', headers: { cookie: sessionCookie } })
+
+    expect(response.status).toBe(200)
+    expect((await response.json()).reauthorizeUrl).toBe('/auth/login?prompt=consent')
+  })
+
+  it('keeps the session alive after disconnecting the health account', async () => {
+    const { base, sessionCookie } = await withServer(stubApp())
+
+    const disconnected = await fetch(`${base}/api/disconnect`, { method: 'POST', headers: { cookie: sessionCookie } })
+    expect(disconnected.status).toBe(200)
+
+    // Signing out of Google Health must not sign you out of OpenFit.
+    expect((await fetch(`${base}/api/status`, { headers: { cookie: sessionCookie } })).status).toBe(200)
   })
 })
 

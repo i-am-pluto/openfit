@@ -12,7 +12,6 @@ const eventRoutes = require('./routes/events.cjs')
 const { registerLoginRoutes } = require('./routes/login.cjs')
 
 const MAX_BODY_BYTES = 1024 * 1024
-const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
 
 function readJsonBody(request) {
   return new Promise((resolve, reject) => {
@@ -159,9 +158,8 @@ function createServer({ staticRoot, token, dataDir, sessions, accounts, registry
 
       try {
         const body = request.method === 'POST' ? await readJsonBody(request) : {}
-        const isLoopback = LOOPBACK.has(request.socket.remoteAddress)
         const accountApp = registry.forAccount(resolved.account)
-        const result = await route.handle(request, response, { body, url, isLoopback, app: accountApp, account: resolved.account })
+        const result = await route.handle(request, response, { body, url, app: accountApp, account: resolved.account })
         if (!response.headersSent && !response.writableEnded) sendJson(response, 200, result ?? null)
       } catch (error) {
         if (response.headersSent) {

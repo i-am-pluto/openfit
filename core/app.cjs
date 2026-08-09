@@ -6,12 +6,16 @@ const path = require('node:path')
 const healthCache = require('./health-cache.cjs')
 const { createAgentRegistry } = require('./agents/index.cjs')
 const { createCredentialStore } = require('./credentials.cjs')
-const { createOAuthCoordinator } = require('./oauth.cjs')
 const { createSecretStore } = require('./secrets.cjs')
 const { createSyncer, localIsoDate, validSyncDate } = require('./sync.cjs')
 const { MAX_MESSAGE_CHARS, MAX_HEALTH_CONTEXT_CHARS, sanitizeMessage } = require('./agents/agent-common.cjs')
 
 const REQUEST_ID = /^[a-zA-Z0-9_-]{8,80}$/
+
+// Health scopes come from the same Google consent as sign-in, so reconnecting
+// the provider means signing in again with the consent screen forced. There is
+// no separate provider authorization to start from inside the app.
+const REAUTHORIZE_URL = '/auth/login?prompt=consent'
 
 function normalizePublicOrigin(value) {
   if (!value) return null
@@ -47,6 +51,7 @@ function createApp(options = {}) {
     credentialFile: path.join(dataDir, 'credentials.secure.json'),
     cacheFile: path.join(dataDir, 'health-cache.secure.json'),
     publicOrigin,
+    defaults: options.oauthDefaults || {},
   })
 
   const agents = createAgentRegistry({
@@ -59,12 +64,6 @@ function createApp(options = {}) {
     },
   })
   agents.prefer(credentials.read().config.agentId)
-
-  const oauth = createOAuthCoordinator({
-    credentials,
-    publicOrigin,
-    onComplete: (result) => events.emit('auth-complete', result),
-  })
 
   const syncer = createSyncer({
     credentials,
@@ -140,29 +139,22 @@ function createApp(options = {}) {
     publicOrigin,
     dataDir,
 
-    getStatus: () => ({ ...credentials.publicStatus(), assistant: agents.getStatus() }),
+    // A refresh token expires after seven days while the Cloud project is in
+    // testing mode, so "signed in but disconnected" is the normal steady state
+    // and every status has to say how to get out of it.
+    getStatus: () => ({
+      ...credentials.publicStatus(),
+      assistant: agents.getStatus(),
+      reauthorizeUrl: REAUTHORIZE_URL,
+    }),
 
-    saveConfig(input) {
-      if (syncInFlight) throw new Error('Wait for the sync to finish before changing the configuration.')
-      const stored = credentials.read()
-      const config = credentials.validateConfig(input || {}, stored.config)
-      const identityChanged = credentials.oauthIdentityChanged(stored.config, config)
-      credentials.save({
-        ...stored,
-        config,
-        token: identityChanged ? null : stored.token,
-        lastSyncAt: identityChanged ? null : stored.lastSyncAt,
-      })
-      if (identityChanged) credentials.clearCache()
-      return credentials.publicStatus()
-    },
-
-    connect({ fromLoopback = true } = {}) {
+    // The renderer calls this with fetch, which would follow a 302 and load
+    // Google's consent page as an XHR. Return the URL and let the browser
+    // navigate.
+    connect() {
       if (syncInFlight) throw new Error('Wait for the sync to finish before reconnecting the account.')
-      return oauth.start({ fromLoopback })
+      return { reauthorizeUrl: REAUTHORIZE_URL }
     },
-
-    handleOAuthCallback: (searchParams) => oauth.handleCallback(searchParams),
 
     async disconnect() {
       if (syncInFlight) throw new Error('Wait for the sync to finish before disconnecting the account.')
@@ -179,7 +171,6 @@ function createApp(options = {}) {
         credentials.forget()
       }
       credentials.clearCache()
-      oauth.cancel()
       return credentials.publicStatus()
     },
 
@@ -210,7 +201,6 @@ function createApp(options = {}) {
     assistant,
 
     async dispose() {
-      oauth.dispose()
       await agents.dispose()
       events.removeAllListeners()
     },

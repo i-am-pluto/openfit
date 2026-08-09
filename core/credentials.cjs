@@ -1,17 +1,17 @@
 'use strict'
 
-const { DEFAULT_PROVIDER, isProvider, providerId } = require('./providers/index.cjs')
+const { DEFAULT_PROVIDER, providerId } = require('./providers/index.cjs')
 
 const DEFAULT_REDIRECT_URI = 'http://127.0.0.1:42813/oauth/callback'
 const OAUTH_IDENTITY_KEYS = ['provider', 'clientId', 'clientSecret', 'redirectUri']
 
-function emptyCredentials() {
+function emptyCredentials(defaults = {}) {
   return {
     config: {
       provider: DEFAULT_PROVIDER,
-      clientId: '',
-      clientSecret: '',
-      redirectUri: DEFAULT_REDIRECT_URI,
+      clientId: defaults.clientId || '',
+      clientSecret: defaults.clientSecret || '',
+      redirectUri: defaults.redirectUri || DEFAULT_REDIRECT_URI,
       agentId: null,
     },
     token: null,
@@ -19,55 +19,37 @@ function emptyCredentials() {
   }
 }
 
-// Google only accepts an http loopback redirect or an https origin. A plain
-// http tailnet host is rejected at the console, so it is rejected here too.
-function validateRedirectUri(value, publicOrigin) {
-  let parsed
-  try {
-    parsed = new URL(value)
-  } catch {
-    throw new Error('The callback URL is invalid.')
+// Only the identity keys the environment actually supplies. An absent variable
+// must not blank out a stored value: the desktop host builds the app without
+// any defaults at all, and reading '' over its config would strand it.
+function configuredIdentity(defaults) {
+  const identity = {}
+  for (const key of OAUTH_IDENTITY_KEYS) {
+    const value = String(defaults?.[key] || '').trim()
+    if (value) identity[key] = value
   }
-  if (parsed.username || parsed.password || parsed.hash) {
-    throw new Error('The callback URL must not contain credentials or a fragment.')
-  }
-  const isLoopback = parsed.protocol === 'http:' && parsed.hostname === '127.0.0.1' && Boolean(parsed.port)
-  const isPublic = Boolean(publicOrigin) && parsed.origin === publicOrigin
-  if (!isLoopback && !isPublic) {
-    const suffix = publicOrigin ? ` or an ${publicOrigin} callback` : ''
-    throw new Error(`Use an http://127.0.0.1 loopback callback with a fixed port${suffix}.`)
-  }
-  return parsed.toString()
+  return identity
 }
 
-function createCredentialStore({ secrets, credentialFile, cacheFile, publicOrigin = null }) {
+function createCredentialStore({ secrets, credentialFile, cacheFile, publicOrigin = null, defaults = {} }) {
   if (!secrets) throw new Error('createCredentialStore requires a secret store.')
 
+  const identity = configuredIdentity(defaults)
+
   function read() {
+    const base = emptyCredentials(defaults)
     const stored = secrets.read(credentialFile, null)
-    if (!stored) return emptyCredentials()
-    return { ...emptyCredentials(), ...stored, config: { ...emptyCredentials().config, ...stored.config } }
+    if (!stored) return base
+    // The environment owns the OAuth identity, so it is applied *after* the
+    // stored config rather than under it. An account configured through the
+    // retired settings screen still has a clientId and secret on disk, and
+    // letting those outrank .env would send token refreshes to a client the
+    // operator has replaced — a silent, undebuggable failure.
+    return { ...base, ...stored, config: { ...base.config, ...stored.config, ...identity } }
   }
 
   function save(credentials) {
     secrets.write(credentialFile, credentials)
-  }
-
-  function validateConfig(input, previous) {
-    const provider = isProvider(input.provider) ? input.provider : DEFAULT_PROVIDER
-    const clientId = String(input.clientId || '').trim()
-    const redirectUri = validateRedirectUri(String(input.redirectUri || DEFAULT_REDIRECT_URI).trim(), publicOrigin)
-    const sameProvider = previous?.provider === provider
-    const clientSecret = String(input.clientSecret || (sameProvider ? previous?.clientSecret : '') || '').trim()
-    if (!clientId) throw new Error('Enter the OAuth Client ID.')
-    if (provider === 'google-health' && !clientSecret) {
-      throw new Error('Google Health requires the Cloud project Client Secret.')
-    }
-    return { provider, clientId, clientSecret, redirectUri, agentId: previous?.agentId ?? null }
-  }
-
-  function oauthIdentityChanged(previous, next) {
-    return OAUTH_IDENTITY_KEYS.some((key) => String(previous?.[key] || '') !== String(next?.[key] || ''))
   }
 
   function publicStatus() {
@@ -94,8 +76,6 @@ function createCredentialStore({ secrets, credentialFile, cacheFile, publicOrigi
   return {
     read,
     save,
-    validateConfig,
-    oauthIdentityChanged,
     publicStatus,
     clearCache: () => secrets.remove(cacheFile),
     readCache: () => secrets.read(cacheFile, null),
@@ -104,4 +84,4 @@ function createCredentialStore({ secrets, credentialFile, cacheFile, publicOrigi
   }
 }
 
-module.exports = { createCredentialStore, validateRedirectUri, DEFAULT_REDIRECT_URI, emptyCredentials }
+module.exports = { createCredentialStore, DEFAULT_REDIRECT_URI, emptyCredentials }

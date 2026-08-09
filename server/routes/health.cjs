@@ -5,9 +5,8 @@
 function register({ add }) {
   add('GET', '/api/status', (request, response, { app }) => app.getStatus())
 
-  add('POST', '/api/config', async (request, response, { app, body }) => app.saveConfig(body))
-
-  add('POST', '/api/connect', async (request, response, { app, isLoopback }) => app.connect({ fromLoopback: isLoopback }))
+  // Returns a URL for the browser to navigate to; see core/app.cjs::connect.
+  add('POST', '/api/connect', async (request, response, { app }) => app.connect())
 
   add('POST', '/api/disconnect', (request, response, { app }) => app.disconnect())
 
