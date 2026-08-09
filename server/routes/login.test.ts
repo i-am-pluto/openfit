@@ -373,9 +373,10 @@ describe('login routes', () => {
     expect(deps.accounts.bumpEpoch).toHaveBeenCalledWith('123')
   })
 
-  // Public routes are dispatched without a parsed body today, so the query form has
-  // to work or "log out everywhere" silently does nothing in production.
-  it('accepts everywhere as a query parameter when no body was parsed', async () => {
+  // The query form is deliberately gone: public POST routes are handed a parsed
+  // body now, and a URL parameter would be a second, linkable way to revoke
+  // every session an account holds.
+  it('ignores everywhere as a query parameter', async () => {
     const deps = buildDeps()
     const sessionCookie = `openfit_session=${deps.sessions.sign({ sub: '123', email: 'a@example.com', epoch: 1 })}`
     const response = fakeResponse()
@@ -383,10 +384,10 @@ describe('login routes', () => {
     await collect(deps).get('POST /auth/logout')!(
       { url: '/auth/logout?everywhere=true', headers: { cookie: sessionCookie } },
       response,
-      { url: new URL('https://box.ts.net/auth/logout?everywhere=true') },
+      { url: new URL('https://box.ts.net/auth/logout?everywhere=true'), body: {} },
     )
 
-    expect(deps.accounts.bumpEpoch).toHaveBeenCalledWith('123')
+    expect(deps.accounts.bumpEpoch).not.toHaveBeenCalled()
     expect(response.status).toBe(200)
   })
 

@@ -6,8 +6,11 @@ const FORWARDED = ['auth-complete', 'sync-progress', 'assistant']
 // One SSE stream carries every push. Multiple devices may listen at once; a
 // disconnect never cancels in-flight work, matching the desktop behavior when
 // the window is backgrounded.
-function register({ add, app }) {
-  add('GET', '/api/events', (request, response) => {
+//
+// The event emitter is read from the per-request context, so a stream only ever
+// forwards the signed-in account's own events.
+function register({ add }) {
+  add('GET', '/api/events', (request, response, { app }) => {
     response.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-store',

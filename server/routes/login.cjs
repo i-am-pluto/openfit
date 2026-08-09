@@ -170,7 +170,7 @@ function registerLoginRoutes({ addPublic, deps }) {
   })
 
   addPublic('POST', '/auth/logout', async (request, response, context = {}) => {
-    const { url, body } = context
+    const { body } = context
     const session = sessions.verify(parseCookies(request.headers?.cookie)[sessions.cookieName])
     // A pending cookie verifies against the same key; it is not a session and
     // must not be able to nominate a subject whose epoch gets bumped.
@@ -178,11 +178,11 @@ function registerLoginRoutes({ addPublic, deps }) {
       ? session.sub
       : null
 
-    // Read from the parsed body when the dispatcher supplies one and from the
-    // query otherwise: public routes are handed `{ url }` alone today (see
-    // server/index.cjs), and a "log out everywhere" that silently does nothing
-    // is the kind of failure nobody notices until it matters.
-    const everywhere = body?.everywhere === true || url?.searchParams.get('everywhere') === 'true'
+    // Body only. server/index.cjs parses a JSON body for public POST routes as
+    // well as guarded ones, so the query form is gone: a URL parameter is a
+    // lasting second way to drive a state-changing control, reachable from a
+    // link and recorded in history.
+    const everywhere = body?.everywhere === true
 
     let revoked = false
     if (everywhere && subject) {

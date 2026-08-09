@@ -1,21 +1,23 @@
 'use strict'
 
-function register({ add, app }) {
-  add('GET', '/api/status', () => app.getStatus())
+// Every handler takes its app from the per-request context. Closing over one
+// app here would bind the whole server to a single account's data directory.
+function register({ add }) {
+  add('GET', '/api/status', (request, response, { app }) => app.getStatus())
 
-  add('POST', '/api/config', async (request, response, { body }) => app.saveConfig(body))
+  add('POST', '/api/config', async (request, response, { app, body }) => app.saveConfig(body))
 
-  add('POST', '/api/connect', async (request, response, { isLoopback }) => app.connect({ fromLoopback: isLoopback }))
+  add('POST', '/api/connect', async (request, response, { app, isLoopback }) => app.connect({ fromLoopback: isLoopback }))
 
-  add('POST', '/api/disconnect', () => app.disconnect())
+  add('POST', '/api/disconnect', (request, response, { app }) => app.disconnect())
 
-  add('POST', '/api/sync', async (request, response, { body }) => app.sync(body?.date))
+  add('POST', '/api/sync', async (request, response, { app, body }) => app.sync(body?.date))
 
-  add('GET', '/api/cached-data', () => app.getCachedData())
+  add('GET', '/api/cached-data', (request, response, { app }) => app.getCachedData())
 
-  add('GET', '/api/cached-archive', () => app.getCachedArchive())
+  add('GET', '/api/cached-archive', (request, response, { app }) => app.getCachedArchive())
 
-  add('GET', '/api/export', (request, response) => {
+  add('GET', '/api/export', (request, response, { app }) => {
     const archive = app.exportArchive()
     const body = Buffer.from(archive.json, 'utf8')
     response.writeHead(200, {
