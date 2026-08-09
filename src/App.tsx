@@ -32,6 +32,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { DashboardData, FitbitAuthStatus, FitbitConfigInput, HealthProvider, PageId } from '@/types'
 import { createDemoData, localIso } from '@/data/demo'
+import { fitbit } from '@/lib/api'
 import { normalizeFitbitData } from '@/data/normalize'
 import { formatDate, relativeTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -74,7 +75,7 @@ const navItems: Array<{ id: PageId; label: string; copy: string; icon: AppIcon; 
 ]
 
 const defaultStatus: FitbitAuthStatus = {
-  isElectron: Boolean(window.fitbit),
+  hasBackend: false,
   configured: false,
   connected: false,
   clientId: '',
@@ -142,9 +143,8 @@ export default function App() {
   }, [data.selectedDate])
 
   const loadNativeState = useCallback(async () => {
-    if (!window.fitbit) return
     try {
-      const [nextStatus, cached] = await Promise.all([window.fitbit.getStatus(), window.fitbit.getCachedData()])
+      const [nextStatus, cached] = await Promise.all([fitbit.getStatus(), fitbit.getCachedData()])
       setStatus(nextStatus)
       if (cached) {
         const normalized = normalizeFitbitData(cached)
@@ -159,11 +159,6 @@ export default function App() {
   }, [])
 
   const runSync = useCallback(async (requestedDate?: string) => {
-    if (!window.fitbit) {
-      setSettingsOpen(true)
-      return
-    }
-
     const firstDate = requestedDate ?? selectedDateRef.current
     if (syncingRef.current) {
       queuedDateRef.current = firstDate
@@ -183,7 +178,7 @@ export default function App() {
         setSyncProgress({ completed: 0, total: 0 })
 
         try {
-          const payload = await window.fitbit.sync(date)
+          const payload = await fitbit.sync(date)
           const normalized = normalizeFitbitData(payload)
 
           if (selectedDateRef.current === date) {
@@ -199,7 +194,7 @@ export default function App() {
             })
           }
 
-          void window.fitbit.getStatus().then(setStatus).catch(() => undefined)
+          void fitbit.getStatus().then(setStatus).catch(() => undefined)
         } catch (error) {
           const queuedDate = queuedDateRef.current
           const failedDateIsStillSelected = selectedDateRef.current === date
@@ -228,8 +223,7 @@ export default function App() {
 
   useEffect(() => {
     void loadNativeState()
-    if (!window.fitbit) return
-    const unsubscribeAuth = window.fitbit.onAuthComplete(async (result) => {
+    const unsubscribeAuth = fitbit.onAuthComplete(async (result) => {
       setConnecting(false)
       if (!result.ok) {
         setToast({ tone: 'error', message: result.error ?? 'Authorization failed.' })
@@ -243,7 +237,7 @@ export default function App() {
       setSelectedDate(authDate)
       void runSync(authDate)
     })
-    const unsubscribeSync = window.fitbit.onSyncProgress((progress) => {
+    const unsubscribeSync = fitbit.onSyncProgress((progress) => {
       if (syncingRef.current && (!progress.date || progress.date === syncTargetDateRef.current)) {
         setSyncProgress(progress)
       }
@@ -277,17 +271,13 @@ export default function App() {
   }
 
   const connect = async () => {
-    if (!window.fitbit) {
-      setToast({ tone: 'neutral', message: 'Launch OpenFit in the Electron app to connect your health provider.' })
-      return
-    }
     if (!status.configured) {
       setSettingsOpen(true)
       return
     }
     setConnecting(true)
     try {
-      const result = await window.fitbit.connect()
+      const result = await fitbit.connect()
       if (!result.ok) throw new Error(result.message ?? 'Unable to start OAuth.')
       setToast({ tone: 'neutral', message: 'Complete authorization in your browser.' })
     } catch (error) {
@@ -297,12 +287,11 @@ export default function App() {
   }
 
   const saveAndConnect = async (config: FitbitConfigInput) => {
-    if (!window.fitbit) return
     try {
-      const nextStatus = await window.fitbit.saveConfig(config)
+      const nextStatus = await fitbit.saveConfig(config)
       setStatus(nextStatus)
       setConnecting(true)
-      const result = await window.fitbit.connect()
+      const result = await fitbit.connect()
       if (!result.ok) throw new Error(result.message ?? 'Unable to start OAuth.')
       setToast({ tone: 'neutral', message: 'Authorize OpenFit in the browser window.' })
     } catch (error) {
@@ -312,8 +301,7 @@ export default function App() {
   }
 
   const disconnect = async () => {
-    if (!window.fitbit) return
-    setStatus(await window.fitbit.disconnect())
+    setStatus(await fitbit.disconnect())
     setData(createDemoData(selectedDate))
     setSettingsOpen(false)
     setPage('today')
@@ -321,11 +309,11 @@ export default function App() {
   }
 
   const exportData = async () => {
-    if (!window.fitbit || data.source === 'demo') {
+    if (data.source === 'demo') {
       setToast({ tone: 'neutral', message: 'Connect Google Health to export real data.' })
       return
     }
-    const result = await window.fitbit.exportData()
+    const result = await fitbit.exportData()
     if (!result.canceled) setToast({ tone: 'success', message: 'JSON archive exported.' })
   }
 
@@ -696,8 +684,7 @@ function SettingsDialog({
     const url = provider === 'google-health'
       ? 'https://console.cloud.google.com/apis/library/health.googleapis.com'
       : 'https://dev.fitbit.com/apps/new'
-    if (window.fitbit) void window.fitbit.openExternal(url)
-    else window.open(url, '_blank', 'noopener,noreferrer')
+    window.open(url, '_blank', 'noopener,noreferrer')
   }
 
   return (

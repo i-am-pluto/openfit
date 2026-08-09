@@ -13,16 +13,18 @@
   },
   "packageManager": "npm@10.9.8",
   "scripts": {
-    "dev": "concurrently -k \"npm:dev:web\" \"npm:dev:electron\"",
+    "dev": "concurrently -k \"npm:dev:api\" \"npm:dev:web\" \"npm:dev:electron\"",
+    "dev:api": "cross-env OPENFIT_SERVER_TOKEN=openfit-dev-token OPENFIT_DATA_DIR=.dev-data node server/bin.cjs --dev --host 127.0.0.1 --port 7789",
     "dev:web": "vite --host 127.0.0.1",
     "dev:electron": "wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
     "build": "tsc -b && vite build",
+    "serve": "npm run build && node server/bin.cjs",
     "preview": "vite preview --host 127.0.0.1",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -b --pretty false",
-    "check:electron": "node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/google-health-service.cjs && node --check electron/fitbit-legacy-service.cjs && node --check electron/health-cache.cjs && node --check electron/codex-service.cjs",
-    "check": "npm run typecheck && npm run check:electron && npm test && npm run build",
+    "check:node": "node scripts/check-node-syntax.cjs",
+    "check": "npm run typecheck && npm run check:node && npm test && npm run build",
     "capture:ui": "electron scripts/capture-ui.cjs",
     "dist": "npm run build && electron-builder"
   },
@@ -63,6 +65,8 @@
     "icon": "build/icon.png",
     "files": [
       "dist/**/*",
+      "core/**/*.cjs",
+      "server/**/*.cjs",
       "electron/**/*.cjs",
       "build/icon.png",
       "package.json"

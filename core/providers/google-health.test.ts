@@ -2,7 +2,7 @@ import { createRequire } from 'node:module'
 import { describe, expect, it } from 'vitest'
 
 const require = createRequire(import.meta.url)
-const { __test } = require('./google-health-service.cjs') as {
+const { __test } = require('./google-health.cjs') as {
   __test: { translateGoogleHealth: (raw: Record<string, any>, date: string) => Record<string, any> }
 }
 

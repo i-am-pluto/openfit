@@ -209,15 +209,18 @@ export interface RawHealthArchive {
 }
 
 export interface FitbitAuthStatus {
-  isElectron: boolean
+  hasBackend: boolean
   configured: boolean
   connected: boolean
   clientId: string
   redirectUri: string
   hasClientSecret: boolean
   storageEncrypted: boolean
+  storageBackend?: string
   lastSyncAt: string | null
   provider: HealthProvider
+  publicOrigin?: string | null
+  assistant?: HealthAssistantStatus
 }
 
 export interface FitbitConfigInput {
@@ -236,17 +239,23 @@ export interface FitbitBridge {
   getCachedData: () => Promise<RawFitbitPayload | null>
   getCachedArchive: () => Promise<RawHealthArchive>
   exportData: () => Promise<{ canceled: boolean; path?: string }>
-  openExternal: (url: string) => Promise<void>
   onAuthComplete: (callback: (result: { ok: boolean; error?: string }) => void) => () => void
   onSyncProgress: (callback: (progress: { completed: number; total: number; key: string; date?: string }) => void) => () => void
 }
 
 export interface HealthAssistantStatus {
+  id: string | null
+  label: string
   available: boolean
   connected: boolean
   authenticated: boolean
-  version: string | null
+  busy?: boolean
+  model?: string
   error?: string
+}
+
+export interface AgentSummary extends HealthAssistantStatus {
+  selected: boolean
 }
 
 export type HealthAssistantEvent =
@@ -257,6 +266,8 @@ export type HealthAssistantEvent =
 
 export interface HealthAssistantBridge {
   getStatus: () => Promise<HealthAssistantStatus>
+  listAgents: () => Promise<{ agents: AgentSummary[]; status: HealthAssistantStatus }>
+  selectAgent: (agentId: string) => Promise<{ status: HealthAssistantStatus; agents: AgentSummary[] }>
   startTurn: (input: {
     requestId: string
     message: string

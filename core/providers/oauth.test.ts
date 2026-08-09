@@ -2,8 +2,8 @@ import { createRequire } from 'node:module'
 import { describe, expect, it } from 'vitest'
 
 const require = createRequire(import.meta.url)
-const google = require('./google-health-service.cjs')
-const legacy = require('./fitbit-legacy-service.cjs')
+const google = require('./google-health.cjs')
+const legacy = require('./fitbit-legacy.cjs')
 
 const config = {
   clientId: 'client-id',

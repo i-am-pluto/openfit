@@ -1438,6 +1438,24 @@ input:focus-visible,
   -webkit-app-region: no-drag;
 }
 
+.assistant-agent {
+  height: 30px;
+  max-width: 148px;
+  padding: 0 6px;
+  border: 1px solid var(--border, #ffffff1f);
+  border-radius: 8px;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.assistant-agent:focus-visible {
+  outline: 2px solid var(--ring, #5ae4c0);
+  outline-offset: 1px;
+}
+
 .assistant-header-actions button {
   display: grid;
   width: 30px;
