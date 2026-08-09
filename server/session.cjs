@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto')
 
+const { CLOCK_SKEW_SECONDS } = require('../core/identity.cjs')
 const { sameToken } = require('./auth.cjs')
 
 const SESSION_COOKIE = 'openfit_session'
@@ -27,17 +28,31 @@ function createSessions({ masterKey, secure = false }) {
   }
 
   // Never throws: a corrupt cookie is a user-facing condition, not a fault.
-  function verify(value) {
+  function verify(value, { maxAgeSeconds = MAX_AGE_SECONDS, now = Math.floor(Date.now() / 1000) } = {}) {
     const parts = String(value || '').split('.')
     if (parts.length !== 3) return null
     const [version, encoded, signature] = parts
     if (version !== VERSION) return null
     if (!sameToken(signature, mac(encoded))) return null
+
+    let payload
     try {
-      return JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'))
+      payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'))
     } catch {
       return null
     }
+    if (!payload || typeof payload !== 'object') return null
+
+    // Age is enforced here rather than left to the cookie's `Max-Age`, which is only a
+    // hint to the browser: a captured cookie value would otherwise be valid forever.
+    // `Number.isFinite` does not coerce, so a missing, NaN or string `iat` fails closed
+    // instead of reading as an unexpirable session.
+    if (!Number.isFinite(payload.iat)) return null
+    if (!Number.isFinite(now) || !Number.isFinite(maxAgeSeconds)) return null
+    if (payload.iat > now + CLOCK_SKEW_SECONDS) return null
+    if (now - payload.iat > maxAgeSeconds) return null
+
+    return payload
   }
 
   const attributes = (maxAge) => {
