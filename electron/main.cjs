@@ -1,11 +1,13 @@
 'use strict'
 
 const { app, BrowserWindow, dialog, nativeTheme, safeStorage, session, shell } = require('electron')
+const crypto = require('node:crypto')
 const path = require('node:path')
 
+const { sameToken } = require('../server/auth.cjs')
 const { composeBackend } = require('../server/compose.cjs')
 const { loadEnv } = require('../server/env.cjs')
-const { PENDING_MAX_AGE_SECONDS } = require('../server/routes/login.cjs')
+const { PENDING_MAX_AGE_SECONDS, SIGN_IN_FLOW_PARAM } = require('../server/routes/login.cjs')
 const { MAX_AGE_SECONDS } = require('../server/session.cjs')
 
 app.commandLine.appendSwitch('lang', 'en-US')
@@ -30,8 +32,12 @@ const SIGN_IN_PATH = '/auth/login'
 
 // A sign-in this window did not start must not be able to sign this window in;
 // see adoptDesktopSession. Matching the pending cookie's own lifetime means the
-// latch never outlives the flow it is guarding.
+// outstanding flow never outlives the pending cookie that carries its id.
 const SIGN_IN_WINDOW_MS = PENDING_MAX_AGE_SECONDS * 1000
+
+// 32 bytes, so the id cannot be guessed by a process that can watch the port but
+// not the handoff. `base64url` keeps it inside the alphabet /auth/login accepts.
+const SIGN_IN_FLOW_BYTES = 32
 
 // One fixed port means a second copy of the app could only ever fail with
 // EADDRINUSE, so the second copy hands the window over instead of racing for it.
@@ -43,7 +49,8 @@ let backend = null
 let httpServer = null
 let startUrl = null
 let allowedOrigin = null
-let signInStartedAt = 0
+// The one sign-in this window is waiting on: `{ id, startedAt }`, or null.
+let outstandingSignIn = null
 
 function developmentUrl() {
   if (app.isPackaged || !process.env.VITE_DEV_SERVER_URL) return null
@@ -116,14 +123,14 @@ async function startBackend(dataDir, options = {}) {
     // The desktop host prefers the OS keychain. core/secrets.cjs decides
     // whether this backend is real; it rejects the Linux `basic_text` one.
     safeStorage,
-    afterAuthorized: (account) => {
+    afterAuthorized: (account, context) => {
       // Never allowed to fail the callback. The token is already stored and the
       // browser already holds its session by this point, so throwing would make
       // server/routes/login.cjs answer 500 and report a failure that did not
       // happen. A window that did not pick the cookie up shows the sign-in page
       // again, which is the honest signal.
       return Promise.resolve()
-        .then(() => adoptDesktopSession(account))
+        .then(() => adoptDesktopSession(account, context))
         .catch((error) => { console.error('Adopting the desktop session failed.', error) })
     },
   })
@@ -189,11 +196,30 @@ function desktopSignInUrl(value) {
   return parsed.toString()
 }
 
+/**
+ * Hands one sign-in to the browser and remembers *which* one.
+ *
+ * The flow id is minted here, appended to the handed-off URL, and signed into
+ * the pending cookie by `/auth/login`, so it comes back through
+ * `afterAuthorized` attached to the flow that actually completed. Without it the
+ * window could only ask "was some sign-in started here recently", which any
+ * other flow finishing first would satisfy.
+ *
+ * `set` rather than `append`: the URL came from the renderer, so a page that
+ * navigated to `/auth/login?flow=<something it chose>` must not be able to
+ * decide the id.
+ *
+ * A second click replaces the outstanding flow. The most recent click is the
+ * one the user is waiting on, and two live ids would be two ways in.
+ */
 function openSignInExternally(url) {
   const target = desktopSignInUrl(url)
   if (!target) return false
-  signInStartedAt = Date.now()
-  void shell.openExternal(target)
+  const id = crypto.randomBytes(SIGN_IN_FLOW_BYTES).toString('base64url')
+  const handoff = new URL(target)
+  handoff.searchParams.set(SIGN_IN_FLOW_PARAM, id)
+  outstandingSignIn = { id, startedAt: Date.now() }
+  void shell.openExternal(handoff.toString())
   return true
 }
 
@@ -207,15 +233,30 @@ function openSignInExternally(url) {
  * though, runs inside this process, so the account is known here and the
  * equivalent cookie can be minted with the same signing key.
  *
- * Only for a sign-in this window actually started. Any process on the machine
- * can reach a loopback port; without the latch, a second local user completing
- * their own Google sign-in against this port would silently retarget this
- * window at their account.
+ * Only for the sign-in this window started, identified by the flow id it minted
+ * and `/auth/login` signed into that flow's pending cookie. Any process on the
+ * machine can reach a loopback port: a second local user, or a page in the
+ * user's ordinary browser navigating to `http://127.0.0.1:7790/auth/login`,
+ * can complete a flow of its own at any time. "A sign-in was started here
+ * recently" does not distinguish those from this one — it would hand the window
+ * to whichever flow finished first, and drop the user's own.
+ *
+ * The outstanding flow is consumed only once it has been matched. A foreign or
+ * expired callback must not be able to burn a live one and leave the genuine
+ * sign-in with nothing to be recognised by.
  */
-async function adoptDesktopSession(account) {
-  const startedAt = signInStartedAt
-  signInStartedAt = 0
-  if (!startedAt || Date.now() - startedAt > SIGN_IN_WINDOW_MS) return false
+async function adoptDesktopSession(account, context) {
+  const outstanding = outstandingSignIn
+  if (!outstanding) return false
+  if (Date.now() - outstanding.startedAt > SIGN_IN_WINDOW_MS) {
+    outstandingSignIn = null
+    return false
+  }
+  // Constant time, and false whenever either side is not a string: a callback
+  // that carried no flow id at all arrives here as `null`.
+  if (!sameToken(context?.flowId, outstanding.id)) return false
+
+  outstandingSignIn = null
   if (!backend || !allowedOrigin) return false
 
   await session.defaultSession.cookies.set({

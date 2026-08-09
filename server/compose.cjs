@@ -155,9 +155,14 @@ function composeBackend(options = {}) {
       // host's hook for its own cookie jar. It is awaited, so a host that lets
       // it throw fails the callback after the token was already written; the
       // desktop host contains its own errors for exactly that reason.
-      onAuthorized: async (account, tokens) => {
+      //
+      // `context` carries the flow id from the pending cookie. It is passed
+      // through rather than interpreted here: only the host that minted one can
+      // tell whether the flow that just completed is the one it started, and a
+      // host that gets `null` must treat the result as somebody else's.
+      onAuthorized: async (account, tokens, context) => {
         const status = await registry.forAccount(account).adoptToken(tokens)
-        if (afterAuthorized) await afterAuthorized(account)
+        if (afterAuthorized) await afterAuthorized(account, context)
         return status
       },
     },

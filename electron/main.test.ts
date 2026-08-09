@@ -339,7 +339,29 @@ describe('the external sign-in handoff', () => {
     expect(openedExternally).toEqual([])
 
     expect(main.openSignInExternally(`${origin}/auth/login?prompt=consent`)).toBe(true)
-    expect(openedExternally).toEqual([`${origin}/auth/login?prompt=consent`])
+    expect(openedExternally).toHaveLength(1)
+
+    const handed = new URL(openedExternally[0])
+    expect(handed.origin).toBe(origin)
+    expect(handed.pathname).toBe('/auth/login')
+    expect(handed.searchParams.get('prompt')).toBe('consent')
+    // The flow id is what lets the callback be recognised as this one.
+    expect(handed.searchParams.get('flow')).toMatch(/^[A-Za-z0-9_-]{16,64}$/)
+  })
+
+  it('mints its own flow id rather than taking one from the page', async () => {
+    // The URL comes from the renderer. A page that navigated to
+    // /auth/login?flow=<something it chose> must not get to pick the id that
+    // decides whose sign-in the window adopts.
+    const { origin } = await start()
+
+    main.openSignInExternally(`${origin}/auth/login?flow=${'p'.repeat(43)}`)
+    main.openSignInExternally(`${origin}/auth/login`)
+
+    const ids = openedExternally.map((value) => new URL(value).searchParams.get('flow'))
+    expect(ids[0]).not.toBe('p'.repeat(43))
+    expect(ids[0]).not.toBe(ids[1])
+    expect(new URL(openedExternally[0]).searchParams.getAll('flow')).toHaveLength(1)
   })
 
   it('compares the whole origin, not a prefix of it', async () => {
@@ -366,8 +388,21 @@ describe('the external sign-in handoff', () => {
 describe('adopting the session the browser signed in with', () => {
   const sub = 'google-sub-desktop'
 
-  async function completeCallback(origin: string) {
-    const login = await fetch(`${origin}/auth/login`, { redirect: 'manual' })
+  /**
+   * Drives a whole sign-in against the loopback server, as a browser would.
+   *
+   * `loginUrl` is what makes this able to play both parts: the window's own
+   * flow starts at the URL that was handed to `shell.openExternal`, and a
+   * foreign flow starts at a bare `/auth/login` it reached on its own.
+   */
+  async function completeCallback(origin: string, options: { loginUrl?: string; sub?: string; email?: string } = {}) {
+    const {
+      loginUrl = `${origin}/auth/login`,
+      sub: subject = sub,
+      email = 'ada@example.com',
+    } = options
+
+    const login = await fetch(loginUrl, { redirect: 'manual' })
     const authorize = new URL(String(login.headers.get('location')))
     const pending = cookieValue(login, 'openfit_pending')
 
@@ -380,8 +415,8 @@ describe('adopting the session the browser signed in with', () => {
         aud: 'desktop-client',
         nonce: authorize.searchParams.get('nonce'),
         exp: Math.floor(Date.now() / 1000) + 3600,
-        sub,
-        email: 'ada@example.com',
+        sub: subject,
+        email,
         email_verified: true,
       }),
     })
@@ -392,6 +427,8 @@ describe('adopting the session the browser signed in with', () => {
     })
   }
 
+  const handedOff = () => String(openedExternally.at(-1))
+
   it('mints the window an equivalent cookie when this window started the sign-in', async () => {
     // The consent happened in the user's browser, which has its own cookie
     // store: the Set-Cookie on the callback is invisible to Electron whatever
@@ -400,7 +437,7 @@ describe('adopting the session the browser signed in with', () => {
     const { origin, sessions } = await start()
     main.openSignInExternally(`${origin}/auth/login`)
 
-    const callback = await completeCallback(origin)
+    const callback = await completeCallback(origin, { loginUrl: handedOff() })
 
     expect(callback.status).toBe(302)
     expect(callback.headers.get('location')).toBe('/')
@@ -430,13 +467,62 @@ describe('adopting the session the browser signed in with', () => {
     expect(cookiesSet).toEqual([])
   })
 
+  it('refuses a sign-in for another account completed while its own is outstanding', async () => {
+    // The window is waiting on its own flow. A second local user — or any page
+    // in the user's ordinary browser, since cross-origin navigation to loopback
+    // is not blocked — drives a whole flow of its own against the same port and
+    // finishes first. "A sign-in was started here recently" is true, so a latch
+    // that is not bound to a specific flow hands the window to the stranger and
+    // then silently drops the user's own callback.
+    const { origin, sessions } = await start()
+    main.openSignInExternally(`${origin}/auth/login`)
+    const ours = handedOff()
+
+    const foreign = await completeCallback(origin, {
+      // No flow id: a foreign process cannot know the one handed to the browser.
+      loginUrl: `${origin}/auth/login`,
+      sub: 'google-sub-attacker',
+      email: 'attacker@example.com',
+    })
+
+    // The foreign browser gets its own session, as it should — that flow was a
+    // real sign-in. What must not happen is this window being moved onto it.
+    expect(foreign.status).toBe(302)
+    expect(cookieValue(foreign, 'openfit_session')).toMatch(/^openfit_session=v1\./)
+    expect(cookiesSet).toEqual([])
+
+    // And the outstanding flow was not burned by it. The user finishes, and it
+    // is their account the window ends up on.
+    const mine = await completeCallback(origin, { loginUrl: ours })
+
+    expect(mine.status).toBe(302)
+    expect(cookiesSet).toHaveLength(1)
+    expect(sessions.verify(cookiesSet[0].value)).toMatchObject({ sub, email: 'ada@example.com' })
+  })
+
+  it('refuses a flow id the window did not mint', async () => {
+    // The parameter is in a URL, so anything that can reach the port can set
+    // it. Guessing is the only way in, against 32 random bytes.
+    const { origin } = await start()
+    main.openSignInExternally(`${origin}/auth/login`)
+
+    const guessed = await completeCallback(origin, {
+      loginUrl: `${origin}/auth/login?flow=${'g'.repeat(43)}`,
+      sub: 'google-sub-guesser',
+      email: 'guesser@example.com',
+    })
+
+    expect(guessed.status).toBe(302)
+    expect(cookiesSet).toEqual([])
+  })
+
   it('stores the exchanged token against the account that signed in', async () => {
     // afterAuthorized runs after adoptToken, so a broken hook must not be able
     // to cost the account its credentials.
     const { origin, dataDir } = await start()
     main.openSignInExternally(`${origin}/auth/login`)
 
-    await completeCallback(origin)
+    await completeCallback(origin, { loginUrl: handedOff() })
 
     const { accountId } = require('../core/accounts.cjs') as { accountId: (value: string) => string }
     const file = path.join(dataDir, 'accounts', accountId(sub), 'credentials.secure.json')

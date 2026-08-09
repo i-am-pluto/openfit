@@ -239,10 +239,15 @@ equivalent session cookie into the window's own jar and reloads it.
 
 Two consequences:
 
-- Only a sign-in the window itself started is adopted. Anything on the machine
-  can reach a loopback port, and without that check another local user could
-  complete their own Google sign-in against port 7790 and silently move the
-  window onto their account.
+- Only *the* sign-in the window started is adopted, not merely one started
+  recently. The window mints a random flow id per click, `/auth/login` signs it
+  into that flow's pending cookie, and the callback is matched against it.
+  Anything on the machine can reach a loopback port — another local user, or a
+  page in your ordinary browser navigating to `http://127.0.0.1:7790/auth/login`
+  — so a flow that finishes first would otherwise move the window onto someone
+  else's account and drop yours. A foreign callback is ignored and, because the
+  match happens before the outstanding flow is consumed, leaves your own
+  sign-in still recognisable.
 - **Sign out** in the window clears the window's session. The browser tab that
   did the sign-in keeps its own until you sign out there too, or use *sign out
   everywhere*, which bumps the account's epoch and invalidates both.
@@ -408,7 +413,7 @@ both reuse their own local login, and OpenFit never stores an API key.
 | The desktop app shows a dialog naming a `.env` path and quits | A packaged build reads `.env` from its user data directory, not from a checkout. See [The desktop app](#the-desktop-app). |
 | The desktop app says port 7790 is in use | Another copy is already running, or something else took the port. The port is fixed because it is in the registered redirect URI. |
 | Clicking sign-in in the desktop app opens a browser | By design. Google's consent screen is unreliable inside an application window; the window picks up the session when the callback completes. |
-| The desktop window stays on the sign-in page after signing in in the browser | The window only adopts a sign-in it started itself, and only within ten minutes. Click **Sign in with Google** in the window and finish that flow. |
+| The desktop window stays on the sign-in page after signing in in the browser | The window adopts only the flow it started itself, and only within ten minutes. Click **Sign in with Google** in the window and finish that browser tab, rather than an older one or a bookmark. |
 | Health disconnected after about a week | Google expires refresh tokens for apps in testing after 7 days. Sign in again — **Reconnect** in the app, which forces a fresh consent. You are not signed out; only health access lapsed. |
 | The sign-in page comes back instead of the dashboard | The session cookie is missing, expired, or revoked by a *sign out everywhere*. Sign in again. |
 | `Sign-in took too long. Start again.` | The pending cookie is older than 10 minutes, or the browser started at one origin and Google returned to another. Start from the origin registered with the OAuth client. |
@@ -418,4 +423,4 @@ both reuse their own local login, and OpenFit never stores an API key.
 | `dist/index.html is missing` | Run `npm run build` first, or use `npm run serve`. |
 | `Port 7788 is already in use` | Another instance is running, or pick a different `--port`. |
 | Assistant shows "not found" | The backend's CLI is not on the service's `PATH`. Set `CLAUDE_BINARY` or `CODEX_BINARY` to an absolute path. |
-| The desktop app closes at startup | Known: `electron/main.cjs` has not been updated for Google sign-in. Use the server. |
+| The desktop app closes at startup | It could not compose a backend and said why in a dialog first: usually a missing `.env` or port 7790 in use. Both rows above. |

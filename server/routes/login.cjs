@@ -21,6 +21,28 @@ const PENDING_KIND = 'pending'
 // victim — `prompt=none` most of all, which suppresses the consent screen.
 const PROMPTS = new Set(['consent', 'select_account'])
 
+// An opaque handle a host may attach to one sign-in so it can recognise *that*
+// sign-in when the callback completes. The desktop host mints one per click and
+// compares it in `onAuthorized`; without it, "a sign-in was started here
+// recently" is the only thing a host can check, and any other flow finishing
+// first satisfies that.
+//
+// It is signed into the pending cookie rather than kept in memory, so the answer
+// travels with the flow. It is never a secret this route enforces anything with:
+// the caller supplied it, so the caller is the only one who can recognise it.
+const SIGN_IN_FLOW_PARAM = 'flow'
+
+// Attacker-reachable, like everything else in this query string. Bounded and
+// restricted to an unreserved alphabet so it cannot bloat the cookie or carry
+// anything a consumer might interpret; anything else is dropped, which fails
+// closed because a host that finds no flow id must not adopt the result.
+const FLOW_ID = /^[A-Za-z0-9_-]{16,64}$/
+
+function requestedFlowId(url) {
+  const value = url.searchParams.get(SIGN_IN_FLOW_PARAM)
+  return typeof value === 'string' && FLOW_ID.test(value) ? value : undefined
+}
+
 function base64Url(buffer) {
   return buffer.toString('base64url')
 }
@@ -35,6 +57,10 @@ function usablePending(payload) {
     && payload.nonce !== ''
     && typeof payload.verifier === 'string'
     && payload.verifier !== ''
+    // Optional, because only the desktop host sets one — but never anything but
+    // a string. A cookie carrying, say, `flowId: true` would otherwise reach a
+    // consumer's comparison as a non-string and could make it fail open.
+    && (payload.flowId === undefined || (typeof payload.flowId === 'string' && payload.flowId !== ''))
 }
 
 function registerLoginRoutes({ addPublic, deps }) {
@@ -62,10 +88,13 @@ function registerLoginRoutes({ addPublic, deps }) {
 
     const requested = url.searchParams.get('prompt')
     const prompt = PROMPTS.has(requested) ? requested : undefined
+    const flowId = requestedFlowId(url)
 
     // The pending values are signed into a short-lived cookie rather than held
-    // in memory, so a restart mid-sign-in does not strand the flow.
-    const pending = sessions.sign({ kind: PENDING_KIND, state, nonce, verifier })
+    // in memory, so a restart mid-sign-in does not strand the flow. `flowId` is
+    // omitted entirely when absent, so a pending cookie either names one flow or
+    // names none.
+    const pending = sessions.sign({ kind: PENDING_KIND, state, nonce, verifier, ...(flowId ? { flowId } : {}) })
 
     response.writeHead(302, {
       // `nonce` is not optional: core/identity.cjs rejects an ID token whose
@@ -150,7 +179,10 @@ function registerLoginRoutes({ addPublic, deps }) {
     }
 
     try {
-      await onAuthorized(account, tokens)
+      // The flow id comes from the pending cookie, never from the query string:
+      // it has to be the one the browser was carrying when it left for Google,
+      // or a caller could name someone else's flow at the callback.
+      await onAuthorized(account, tokens, { flowId: pending.flowId ?? null })
     } catch {
       // No session is issued: a browser signed in against an account whose token
       // was never stored looks connected and can do nothing. Storage errors name
@@ -204,4 +236,4 @@ function registerLoginRoutes({ addPublic, deps }) {
   })
 }
 
-module.exports = { registerLoginRoutes, PENDING_COOKIE, PENDING_MAX_AGE_SECONDS }
+module.exports = { registerLoginRoutes, PENDING_COOKIE, PENDING_MAX_AGE_SECONDS, SIGN_IN_FLOW_PARAM, FLOW_ID }

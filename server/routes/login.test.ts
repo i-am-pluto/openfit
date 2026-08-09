@@ -2,10 +2,11 @@ import { createRequire } from 'node:module'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const require = createRequire(import.meta.url)
-const { registerLoginRoutes, PENDING_COOKIE, PENDING_MAX_AGE_SECONDS } = require('./login.cjs') as {
+const { registerLoginRoutes, PENDING_COOKIE, PENDING_MAX_AGE_SECONDS, SIGN_IN_FLOW_PARAM } = require('./login.cjs') as {
   registerLoginRoutes: (options: Record<string, any>) => void
   PENDING_COOKIE: string
   PENDING_MAX_AGE_SECONDS: number
+  SIGN_IN_FLOW_PARAM: string
 }
 const { createSessions } = require('../session.cjs') as { createSessions: (o: any) => any }
 const { loginPage } = require('../login-page.cjs') as { loginPage: (message?: string) => string }
@@ -177,6 +178,60 @@ describe('login routes', () => {
     expect(setCookie(response).join('\n')).toContain('openfit_session=')
     // The used state and verifier must not survive the exchange.
     expect(setCookie(response).find((value) => value.startsWith(PENDING_COOKIE))).toContain('Max-Age=0')
+  })
+
+  // A host that starts sign-in somewhere the callback cannot reach — the desktop
+  // window hands the flow to the user's browser — has no other way to tell its
+  // own completed flow from any other flow completing on the same loopback port.
+  it('carries a flow id from /auth/login through to onAuthorized', async () => {
+    const deps = buildDeps()
+    const routes = collect(deps)
+    const flow = 'A'.repeat(32)
+    const { cookie, state } = await signIn(routes, `?${SIGN_IN_FLOW_PARAM}=${flow}`)
+
+    await callback(routes, `?code=abc&state=${state}`, cookie)
+
+    expect(deps.onAuthorized.mock.calls[0][2]).toEqual({ flowId: flow })
+  })
+
+  it('reports no flow id when the sign-in named none', async () => {
+    // Explicitly `null`, not absent or undefined: a consumer comparing it must
+    // get a value that cannot equal a real id.
+    const deps = buildDeps()
+    const routes = collect(deps)
+    const { cookie, state } = await signIn(routes)
+
+    await callback(routes, `?code=abc&state=${state}`, cookie)
+
+    expect(deps.onAuthorized.mock.calls[0][2]).toEqual({ flowId: null })
+  })
+
+  // The parameter is attacker-reachable like every other one here. Anything
+  // outside the accepted shape is dropped rather than carried, which fails
+  // closed: a host that finds no flow id must not adopt the result.
+  it('drops a flow id that is not the accepted shape', async () => {
+    const deps = buildDeps()
+    const routes = collect(deps)
+
+    for (const hostile of ['short', 'x'.repeat(65), 'has spaces', 'semi;colon', '../../etc', '']) {
+      const { cookie, state } = await signIn(routes, `?${SIGN_IN_FLOW_PARAM}=${encodeURIComponent(hostile)}`)
+      await callback(routes, `?code=abc&state=${state}`, cookie)
+      expect(deps.onAuthorized.mock.calls.at(-1)![2]).toEqual({ flowId: null })
+    }
+  })
+
+  // The flow id must come from the cookie the browser was carrying when it left
+  // for Google, never from the callback's own query string, or a caller could
+  // name a flow it did not start.
+  it('takes the flow id from the pending cookie, not the callback query', async () => {
+    const deps = buildDeps()
+    const routes = collect(deps)
+    const flow = 'B'.repeat(32)
+    const { cookie, state } = await signIn(routes, `?${SIGN_IN_FLOW_PARAM}=${flow}`)
+
+    await callback(routes, `?code=abc&state=${state}&${SIGN_IN_FLOW_PARAM}=${'C'.repeat(32)}`, cookie)
+
+    expect(deps.onAuthorized.mock.calls[0][2]).toEqual({ flowId: flow })
   })
 
   it('rejects a callback with no pending cookie', async () => {

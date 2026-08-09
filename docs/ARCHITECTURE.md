@@ -59,7 +59,7 @@ flowchart LR
 > unreliable in an embedded user agent, the window hands `/auth/login` to the
 > real browser; the browser's cookie jar is not the window's, so the callback —
 > which is handled in this same process — mints the window an equivalent
-> session cookie directly. See
+> session cookie directly, but only for the flow the window itself started. See
 > [SELF_HOSTING.md](SELF_HOSTING.md#the-desktop-app).
 
 ## Accounts
@@ -127,7 +127,11 @@ the stored value. There is no session list to walk and nothing to expire.
 
 Sign-in itself is one Google authorization for both identity and health scopes.
 `GET /auth/login` mints `state`, `nonce`, and a PKCE verifier, signs them into a
-ten-minute `openfit_pending` cookie scoped to `/auth`, and redirects.
+ten-minute `openfit_pending` cookie scoped to `/auth`, and redirects. It also
+signs in an optional caller-supplied `flow` id and hands it back through
+`onAuthorized`, which is how a host that starts sign-in somewhere the callback
+cannot reach — the desktop window, which hands the flow to the user's browser —
+tells its own completed flow from any other flow completing on the same port.
 `GET /auth/callback` clears that cookie on every exit — success or failure — so
 a state and verifier cannot be replayed for the rest of their lifetime. The
 pending cookie and the session cookie are signed with the same key, so the
