@@ -7,6 +7,7 @@ const healthCache = require('./health-cache.cjs')
 const { createAgentRegistry } = require('./agents/index.cjs')
 const { createCredentialStore } = require('./credentials.cjs')
 const { createSecretStore } = require('./secrets.cjs')
+const { createUserProfileStore } = require('./user-profile.cjs')
 const { createSyncer, localIsoDate, validSyncDate } = require('./sync.cjs')
 const { MAX_MESSAGE_CHARS, MAX_HEALTH_CONTEXT_CHARS, sanitizeMessage } = require('./agents/agent-common.cjs')
 
@@ -54,6 +55,11 @@ function createApp(options = {}) {
     defaults: options.oauthDefaults || {},
   })
 
+  const userProfile = createUserProfileStore({
+    secrets,
+    profileFile: path.join(dataDir, 'user-profile.secure.json'),
+  })
+
   const agents = createAgentRegistry({
     env,
     createOptions: { cwd: dataDir, clientVersion: options.clientVersion || '1.0.0' },
@@ -75,6 +81,20 @@ function createApp(options = {}) {
 
   function emitAssistant(event) {
     events.emit('assistant', event)
+  }
+
+  // Field names in the v4 profile response are unverified — the audit in Task 1
+  // could not run. Map defensively: anything unrecognized is simply absent, and
+  // every field stays editable by hand, so a wrong guess costs nothing.
+  function prefillFromProvider(payload) {
+    const user = payload?.endpoints?.profileRaw?.user
+    if (!user || typeof user !== 'object') return
+    userProfile.save({
+      heightCm: user.height ?? null,
+      birthYear: typeof user.dateOfBirth === 'string' && /^\d{4}/.test(user.dateOfBirth)
+        ? Number(user.dateOfBirth.slice(0, 4))
+        : null,
+    }, { source: 'provider' })
   }
 
   const assistant = {
@@ -215,7 +235,15 @@ function createApp(options = {}) {
       if (syncInFlight) throw new Error('A sync is already in progress.')
       syncInFlight = syncer(requested)
       try {
-        return await syncInFlight
+        const payload = await syncInFlight
+        // A malformed profile response must never fail a sync that otherwise
+        // succeeded, so the prefill is advisory and its failure is swallowed.
+        try {
+          prefillFromProvider(payload)
+        } catch {
+          /* the profile stays exactly as it was */
+        }
+        return payload
       } finally {
         syncInFlight = null
       }
@@ -223,6 +251,9 @@ function createApp(options = {}) {
 
     getCachedData: () => healthCache.latestDay(credentials.readCache()),
     getCachedArchive: () => healthCache.normalizeArchive(credentials.readCache()),
+
+    getProfile: () => userProfile.read(),
+    saveProfile: (patch) => userProfile.save(patch, { source: 'user' }),
 
     exportArchive() {
       const archive = healthCache.normalizeArchive(credentials.readCache())

@@ -10,6 +10,9 @@ const { createServer } = require('./index.cjs') as {
   createServer: (options: Record<string, any>) => { server: any; token: string }
 }
 const { createSessions } = require('./session.cjs') as { createSessions: (options: any) => any }
+const { createUserProfileStore } = require('../core/user-profile.cjs') as {
+  createUserProfileStore: (options: any) => any
+}
 
 const MASTER_KEY = Buffer.alloc(32, 11)
 const LETTERS = ['a', 'b', 'c', 'd']
@@ -20,8 +23,25 @@ afterEach(() => {
   for (const cleanup of cleanups.splice(0)) cleanup()
 })
 
+// The profile stub is the real store over an in-memory secrets object rather
+// than a bare mock: the round-trip test is only meaningful if a GET after a POST
+// reads back through the same validation the server actually runs.
+function memoryProfileStore() {
+  const files = new Map<string, any>()
+  return createUserProfileStore({
+    secrets: {
+      read: (file: string, fallback: any) => (files.has(file) ? files.get(file) : fallback),
+      write: (file: string, value: any) => { files.set(file, value) },
+      remove: (file: string) => { files.delete(file) },
+      describe: () => ({ encrypted: true, backend: 'test' }),
+    },
+    profileFile: '/mock/user-profile.secure.json',
+  })
+}
+
 function stubApp(overrides: Record<string, any> = {}) {
   const events = new EventEmitter()
+  const profile = memoryProfileStore()
   return {
     events,
     dataDir: '/mock',
@@ -32,6 +52,8 @@ function stubApp(overrides: Record<string, any> = {}) {
     getCachedData: vi.fn(() => null),
     getCachedArchive: vi.fn(() => ({ version: 2, lastDate: null, days: {} })),
     exportArchive: vi.fn(() => ({ filename: 'openfit-archive-2026-08-09.json', json: '{"days":{}}' })),
+    getProfile: vi.fn(() => profile.read()),
+    saveProfile: vi.fn((patch: any) => profile.save(patch, { source: 'user' })),
     assistant: {
       listAgents: vi.fn(() => [{ id: 'codex', label: 'Codex', available: true, selected: true }]),
       getStatus: vi.fn(() => ({ id: 'codex', label: 'Codex', available: true, authenticated: true })),
@@ -198,6 +220,34 @@ describe('server routes', () => {
     expect(response.status).toBe(200)
     expect(response.headers.get('content-disposition')).toContain('attachment; filename="openfit-archive-2026-08-09.json"')
     expect(await response.text()).toBe('{"days":{}}')
+  })
+
+  it('round-trips the user profile', async () => {
+    const { call } = await withServer(stubApp())
+
+    const saved = await (await call('/api/profile', {
+      method: 'POST',
+      body: JSON.stringify({ birthYear: 1990, heightCm: 178 }),
+    })).json()
+    expect(saved).toMatchObject({ birthYear: 1990, heightCm: 178 })
+
+    expect(await (await call('/api/profile')).json()).toMatchObject({ birthYear: 1990, heightCm: 178 })
+  })
+
+  it('rejects a non-object profile body', async () => {
+    const app = stubApp()
+    const { call } = await withServer(app)
+
+    const response = await call('/api/profile', { method: 'POST', body: JSON.stringify(['not', 'an', 'object']) })
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ error: 'The profile update must be an object.' })
+    expect(app.saveProfile).not.toHaveBeenCalled()
+  })
+
+  it('returns an all-null profile before anything is saved', async () => {
+    const { call } = await withServer(stubApp())
+
+    expect(await (await call('/api/profile')).json()).toMatchObject({ birthYear: null, heightCm: null })
   })
 
   it('routes assistant calls, including agent selection', async () => {

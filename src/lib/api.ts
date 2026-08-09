@@ -8,6 +8,7 @@ import type {
   RawFitbitPayload,
   RawHealthArchive,
   SessionBridge,
+  UserProfile,
 } from '@/types'
 
 /**
@@ -143,6 +144,16 @@ export const fitbit: FitbitBridge = {
   exportData: downloadArchive,
   onAuthComplete: (callback) => subscribe('auth-complete', callback),
   onSyncProgress: (callback) => subscribe('sync-progress', callback),
+}
+
+/**
+ * The facts the provider cannot supply. Held server-side in the encrypted secret
+ * store, never in localStorage, because this is personal data on the same
+ * footing as credentials and the health cache.
+ */
+export const profile = {
+  get: () => request<UserProfile>('/api/profile'),
+  save: (patch: Partial<UserProfile>) => request<UserProfile>('/api/profile', 'POST', patch),
 }
 
 /**

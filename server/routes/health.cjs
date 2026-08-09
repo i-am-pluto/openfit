@@ -16,6 +16,18 @@ function register({ add }) {
 
   add('GET', '/api/cached-archive', (request, response, { app }) => app.getCachedArchive())
 
+  add('GET', '/api/profile', (request, response, { app }) => app.getProfile())
+
+  // The body is a partial profile. Validation lives in the store, which is the
+  // only thing that writes to disk — a route-level check would be a second,
+  // drifting copy of the same rules.
+  add('POST', '/api/profile', (request, response, { app, body }) => {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      throw new Error('The profile update must be an object.')
+    }
+    return app.saveProfile(body)
+  })
+
   add('GET', '/api/export', (request, response, { app }) => {
     const archive = app.exportArchive()
     const body = Buffer.from(archive.json, 'utf8')

@@ -4,6 +4,25 @@ export type DataSource = 'demo' | 'fitbit' | 'google-health' | 'cache'
 
 export type HealthProvider = 'google-health' | 'fitbit-legacy'
 
+/**
+ * The small set of facts the health provider cannot supply, each justified by a
+ * named consumer. Biological sex is deliberately excluded: its only use would be
+ * generic population threshold tables, which HOME_DASHBOARD_MODEL.md rejects.
+ *
+ * Every field is optional. Every consumer already handles null.
+ */
+export interface UserProfile {
+  birthYear: number | null
+  heightCm: number | null
+  measuredMaxHeartRate: number | null
+  stepsGoal: number | null
+  sleepGoalMinutes: number | null
+  waterGoalMl: number | null
+  weightGoalKg: number | null
+  /** Fields the user has edited by hand. A later sync must never overwrite these. */
+  userEdited: string[]
+}
+
 export interface TimePoint {
   time: string
   value: number
