@@ -1541,8 +1541,78 @@ input:focus-visible,
   line-height: 1.5;
 }
 
-.assistant-user-message p,
-.assistant-ai-message p { margin: 0; }
+.assistant-user-message p { margin: 0; }
+.assistant-ai-message p { margin: 0 0 0.6em; }
+.assistant-ai-message > div > :last-child { margin-bottom: 0; }
+
+.assistant-ai-message h1,
+.assistant-ai-message h2,
+.assistant-ai-message h3 {
+  margin: 0.9em 0 0.4em;
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.assistant-ai-message > div > :first-child { margin-top: 0; }
+
+.assistant-ai-message ul,
+.assistant-ai-message ol {
+  margin: 0 0 0.6em;
+  padding-left: 1.25em;
+}
+.assistant-ai-message li { margin: 0.15em 0; }
+.assistant-ai-message li > p { margin: 0; }
+
+.assistant-ai-message strong { font-weight: 600; }
+
+.assistant-ai-message code {
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: var(--color-surface-muted, rgb(0 0 0 / 6%));
+  font-size: 0.86em;
+}
+.assistant-ai-message pre {
+  margin: 0 0 0.6em;
+  padding: 0.6em 0.75em;
+  overflow-x: auto;
+  border-radius: 8px;
+  background: var(--color-surface-muted, rgb(0 0 0 / 6%));
+}
+.assistant-ai-message pre code {
+  padding: 0;
+  background: none;
+}
+
+.assistant-ai-message blockquote {
+  margin: 0 0 0.6em;
+  padding-left: 0.75em;
+  border-left: 2px solid var(--color-graphite, rgb(0 0 0 / 20%));
+  opacity: 0.85;
+}
+
+/* A wide table scrolls itself; the sidebar must never scroll sideways. */
+.assistant-table-scroll {
+  margin: 0 0 0.6em;
+  overflow-x: auto;
+}
+.assistant-ai-message table {
+  border-collapse: collapse;
+  font-size: 0.86em;
+}
+.assistant-ai-message th,
+.assistant-ai-message td {
+  padding: 0.3em 0.55em;
+  border: 1px solid var(--color-graphite, rgb(0 0 0 / 15%));
+  text-align: left;
+  white-space: nowrap;
+}
+.assistant-ai-message th { font-weight: 600; }
+
+.assistant-ai-message hr {
+  margin: 0.8em 0;
+  border: 0;
+  border-top: 1px solid var(--color-graphite, rgb(0 0 0 / 15%));
+}
 
 .assistant-ai-message {
   display: grid;
@@ -3112,4 +3182,63 @@ input:focus-visible,
   .sleep-timeline-card { padding-inline: 14px; }
   .sleep-timeline-label,
   .sleep-timeline-time { font-size: 11px; }
+}
+
+/* Analysis charts (AnalysisCharts.tsx) — scatter, heat map, stack, range band,
+   diverging columns. They reuse .chart-empty, .chart-gridline, .chart-tick,
+   .chart-label and .chart-tooltip; only what is genuinely new is defined here. */
+.scatter-chart,
+.heatmap-grid,
+.stacked-bar-chart,
+.range-band-chart,
+.diverging-column-chart { position: relative; display: flex; width: 100%; flex-direction: column; gap: 9px; }
+
+.scatter-chart-plot,
+.heatmap-grid-plot,
+.stacked-bar-chart-plot,
+.range-band-chart-plot,
+.diverging-column-chart-plot { position: relative; width: 100%; overflow: visible; }
+
+.scatter-chart-plot > svg,
+.heatmap-grid-plot > svg,
+.stacked-bar-chart-plot > svg,
+.range-band-chart-plot > svg,
+.diverging-column-chart-plot > svg { display: block; width: 100%; height: 100%; overflow: visible; touch-action: pan-y; }
+
+.heatmap-cell-value {
+  fill: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.chart-key {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chart-key li { display: flex; align-items: center; gap: 6px; color: var(--color-slate); font-size: 12px; }
+
+.chart-key-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex: none;
+}
+
+.chart-key-swatch.is-dashed { border: 1px dashed var(--color-fog); background-clip: padding-box; }
+
+.chart-note { margin: 0; color: var(--color-slate); font-size: 12px; line-height: 1.45; }
+.chart-note.is-strong { color: var(--color-mist); font-family: var(--font-mono); }
+
+.scatter-chart-readout { display: flex; flex-direction: column; gap: 3px; }
+
+@media (max-width: 720px) {
+  .chart-key li { font-size: 11px; }
+  .heatmap-cell-value { font-size: 10px; }
 }

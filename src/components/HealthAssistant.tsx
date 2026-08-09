@@ -12,6 +12,7 @@ import {
 } from '@assistant-ui/react'
 import { ArrowDown, ArrowUp, Plus, Sparkles, Square, X } from 'lucide-react'
 import { fitbit, healthAssistant } from '@/lib/api'
+import { MarkdownText } from '@/components/MarkdownText'
 import { normalizeFitbitData } from '@/data/normalize'
 import {
   buildHealthAssistantContext,
@@ -356,7 +357,7 @@ function AssistantMessage() {
   return (
     <MessagePrimitive.Root className="assistant-ai-message">
       <span className="assistant-response-mark" aria-hidden="true">+</span>
-      <div><MessagePrimitive.Parts /></div>
+      <div><MessagePrimitive.Parts components={{ Text: MarkdownText }} /></div>
     </MessagePrimitive.Root>
   )
 }
