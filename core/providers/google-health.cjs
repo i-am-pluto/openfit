@@ -1,5 +1,25 @@
 'use strict'
 
+// What /users/me/profile and /users/me/settings actually return, recorded from
+// scripts/audit-google-health-raw.cjs against a live account on 2026-08-09
+// (31 of 31 requests succeeded; field names only, no values):
+//
+//   /users/me/profile   age, membershipStartDate{year,month,day}, name,
+//                       userConfiguredRunningStrideLengthMm,
+//                       userConfiguredWalkingStrideLengthMm
+//   /users/me/settings  autoStrideEnabled, distanceUnit, foodLanguageCode,
+//                       glucoseUnit, heightUnit, languageLocale, name,
+//                       strideLengthRunningType, strideLengthWalkingType,
+//                       temperatureUnit, timeZone, utcOffset, waterUnit,
+//                       weightUnit
+//
+// Two consequences the code below depends on. There is no goal anywhere in the
+// v4 surface this app is scoped for — no goal endpoint, and no goal field in
+// either response — so the user profile store is the only source of goals until
+// Google exposes one. And the profile carries no height and no date of birth,
+// only `age`, so BMI cannot be derived from the provider on Google Health.
+// Both mappings are written anyway and are simply inert until a source appears.
+
 const crypto = require('node:crypto')
 
 const API_BASE = 'https://health.googleapis.com/v4'
@@ -360,6 +380,31 @@ function selected(map, date) {
   return map.get(date) ?? null
 }
 
+function plainObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+}
+
+// An absent goal must stay absent. Emitting `steps: null` would let a consumer
+// that only checks `in` treat "no goal" as "a goal of nothing".
+function withoutUndefined(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== null && item !== undefined))
+}
+
+// A height is only usable when it is plausibly centimetres. A profile that
+// reported metres or inches would otherwise produce a confident, wrong BMI, and
+// a wrong number on screen is worse than a missing one.
+function heightCentimetres(value) {
+  const parsed = numeric(value)
+  return parsed !== null && parsed >= 50 && parsed <= 260 ? parsed : null
+}
+
+function bodyMassIndex(weightKg, heightCm) {
+  if (weightKg === null || weightKg === undefined || heightCm === null) return null
+  const metres = heightCm / 100
+  const index = numeric(weightKg, (kilograms) => kilograms / (metres * metres))
+  return index === null ? null : Number(index.toFixed(2))
+}
+
 function numeric(value, transform = (number) => number) {
   if (value === undefined || value === null || value === '') return null
   const parsed = Number(value)
@@ -524,9 +569,21 @@ function translateGoogleHealth(raw, selectedDate) {
     const time = timeFromCivil(record.sampleTime?.civilTime) || record.sampleTime?.physicalTime?.slice(11, 16)
     return { time, value: Number(record.beatsPerMinute || 0) }
   }).filter((point) => point.time && point.value).sort((a, b) => a.time.localeCompare(b.time))
-  const profile = raw.profileRaw || {}
-  const settings = raw.settingsRaw || {}
-  const userInfo = raw.userInfo || {}
+  const profile = plainObject(raw.profileRaw)
+  const settings = plainObject(raw.settingsRaw)
+  const userInfo = plainObject(raw.userInfo)
+  // The v4 profile is flat, but the legacy Fitbit profile nests everything under
+  // `user`, and the renderer's prefill reads the nested form. Accept either
+  // rather than picking one and being silently wrong on the other.
+  const profileUser = plainObject(profile.user)
+  const heightCm = heightCentimetres(profileUser.height ?? profile.height)
+  // Goals have no v4 endpoint today, so these stay empty on every real sync.
+  // Reading them here means the goals light up the moment one exists, without
+  // a second pass over this function.
+  const activityGoals = plainObject(raw.goalsRaw)
+  const sleepGoalSource = plainObject(raw.sleepGoalRaw)
+  const weightGoalSource = plainObject(raw.weightGoalRaw)
+  const waterGoalSource = plainObject(raw.waterGoalRaw)
   const membershipDate = dateFromCivil(profile.membershipStartDate)
   const devices = (raw.devicesRaw?.pairedDevices || []).map((device) => ({
     id: String(device.name || '').split('/').at(-1),
@@ -605,7 +662,15 @@ function translateGoogleHealth(raw, selectedDate) {
       activeZoneMinutes: { totalMinutes: todayZone },
       sedentaryMinutes: todaySedentary,
     } },
-    activityGoals: { goals: {} },
+    // Legacy Fitbit shapes, because src/data/normalize.ts was written against
+    // them and legacy Fitbit still emits them: the normalizer is the contract.
+    activityGoals: { goals: withoutUndefined({
+      steps: numeric(activityGoals.steps),
+      caloriesOut: numeric(activityGoals.caloriesOut),
+      distance: numeric(activityGoals.distance),
+      floors: numeric(activityGoals.floors),
+      activeMinutes: numeric(activityGoals.activeMinutes),
+    }) },
     stepsIntraday: { 'activities-steps-intraday': { dataset: stepPoints } },
     caloriesIntraday: { 'activities-calories-intraday': { dataset: [] } },
     heartIntraday: {
@@ -614,7 +679,7 @@ function translateGoogleHealth(raw, selectedDate) {
     },
     sleep: { sleep: selectedSleep ? [selectedSleep] : [] },
     sleepTrend: { sleep: sleepRecords },
-    sleepGoal: { goal: {} },
+    sleepGoal: { goal: withoutUndefined({ minDuration: numeric(sleepGoalSource.minDuration) }) },
     stepsTrend: { 'activities-steps': allDates.map((date) => ({ dateTime: date, value: steps.get(date) })) },
     caloriesTrend: { 'activities-calories': allDates.map((date) => ({ dateTime: date, value: calories.get(date) })) },
     heartTrend: { 'activities-heart': allDates.map((date) => ({ dateTime: date, value: { restingHeartRate: restingHeart.get(date) } })) },
@@ -636,11 +701,13 @@ function translateGoogleHealth(raw, selectedDate) {
       waterMl: water.get(date) ?? null,
       caloriesIn: nutrition.get(date) ?? null,
     })) },
-    bodyWeight: { weight: [...weights].filter(([, weight]) => weight !== null).map(([date, weight]) => ({ date, weight, bmi: null })) },
+    // Derived only when a height is known, and never guessed: v4 sends no BMI
+    // and no height, so this is null until the user fills in their profile.
+    bodyWeight: { weight: [...weights].filter(([, weight]) => weight !== null).map(([date, weight]) => ({ date, weight, bmi: bodyMassIndex(weight, heightCm) })) },
     bodyFat: { fat: [...bodyFat].filter(([, fat]) => fat !== null).map(([date, fat]) => ({ date, fat })) },
-    weightGoal: { goal: {} },
+    weightGoal: { goal: withoutUndefined({ weight: numeric(weightGoalSource.weight) }) },
     water: { summary: { water: selected(water, selectedDate) } },
-    waterGoal: { goal: {} },
+    waterGoal: { goal: withoutUndefined({ goal: numeric(waterGoalSource.goal) }) },
     food: { summary: { calories: selected(nutrition, selectedDate) } },
     breathing: { br: currentBreathing === null ? [] : [{ dateTime: selectedDate, value: { breathingRate: currentBreathing } }] },
     hrv: { hrv: currentHrv === null ? [] : [{ dateTime: selectedDate, value: {
@@ -665,6 +732,11 @@ function translateGoogleHealth(raw, selectedDate) {
     ecg: { ecgReadings },
     activities: { activities },
     identity: raw.identity,
+    // Kept raw so the renderer can prefill the user profile from whatever the
+    // provider actually returned. Field names here are not guaranteed by the v4
+    // API docs, so nothing downstream may assume a key exists.
+    profileRaw: raw.profileRaw ?? null,
+    settingsRaw: raw.settingsRaw ?? null,
     ...(raw.irnProfileRaw !== undefined || raw.irnAlertsRaw !== undefined
       ? { irregularRhythm: { profile: raw.irnProfileRaw, alerts: raw.irnAlertsRaw } }
       : {}),

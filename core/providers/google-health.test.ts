@@ -157,3 +157,84 @@ describe('Google Health adapter', () => {
     expect(endpoints.activity.summary.veryActiveMinutes).toBeNull()
   })
 })
+
+describe('google health goal and profile passthrough', () => {
+  it('carries the raw profile and settings through to the payload', () => {
+    const raw = {
+      profileRaw: { user: { height: 178, dateOfBirth: '1990-04-12', strideLengthWalking: 71 } },
+      settingsRaw: { timeZone: 'Europe/Rome' },
+    }
+    const endpoints = __test.translateGoogleHealth(raw, '2026-08-09')
+    expect(endpoints.profileRaw).toEqual(raw.profileRaw)
+    expect(endpoints.settingsRaw).toEqual(raw.settingsRaw)
+  })
+
+  it('maps recognized goal fields instead of emitting empty objects', () => {
+    const endpoints = __test.translateGoogleHealth({
+      profileRaw: { user: { height: 178 } },
+      goalsRaw: { steps: 9000, caloriesOut: 2400, distance: 7.5, floors: 12, activeMinutes: 45 },
+      sleepGoalRaw: { minDuration: 450 },
+      weightGoalRaw: { weight: 71.5 },
+      waterGoalRaw: { goal: 2400 },
+    }, '2026-08-09')
+
+    expect(endpoints.activityGoals.goals).toEqual({ steps: 9000, caloriesOut: 2400, distance: 7.5, floors: 12, activeMinutes: 45 })
+    expect(endpoints.sleepGoal.goal.minDuration).toBe(450)
+    expect(endpoints.weightGoal.goal.weight).toBe(71.5)
+    expect(endpoints.waterGoal.goal.goal).toBe(2400)
+  })
+
+  it('leaves goals absent rather than zero when the provider sends nothing', () => {
+    const endpoints = __test.translateGoogleHealth({}, '2026-08-09')
+    expect(endpoints.activityGoals.goals.steps ?? null).toBeNull()
+    expect(endpoints.sleepGoal.goal.minDuration ?? null).toBeNull()
+    expect(endpoints.weightGoal.goal.weight ?? null).toBeNull()
+    expect(endpoints.waterGoal.goal.goal ?? null).toBeNull()
+    // Absent, not present-and-null: a consumer that only checks `in` must not
+    // read "no goal" as "a goal of nothing".
+    expect(Object.keys(endpoints.activityGoals.goals)).toHaveLength(0)
+  })
+
+  it('derives BMI from height when the provider omits it', () => {
+    const endpoints = __test.translateGoogleHealth({
+      profileRaw: { user: { height: 178 } },
+      weightDaily: { rollupDataPoints: [daily('2026-08-09', { weight: { weightGramsAvg: 72400 } })] },
+    }, '2026-08-09')
+    const entry = endpoints.bodyWeight.weight.find((item: { date: string }) => item.date === '2026-08-09')
+    // 72.4 / 1.78^2 = 22.85
+    expect(entry.bmi).toBeCloseTo(22.85, 1)
+  })
+
+  it('reads a height the v4 profile returns without a user wrapper', () => {
+    const endpoints = __test.translateGoogleHealth({
+      profileRaw: { height: 178 },
+      weightDaily: { rollupDataPoints: [daily('2026-08-09', { weight: { weightGramsAvg: 72400 } })] },
+    }, '2026-08-09')
+    const entry = endpoints.bodyWeight.weight.find((item: { date: string }) => item.date === '2026-08-09')
+    expect(entry.bmi).toBeCloseTo(22.85, 1)
+  })
+
+  it('leaves BMI null when height is unknown', () => {
+    const endpoints = __test.translateGoogleHealth({
+      weightDaily: { rollupDataPoints: [daily('2026-08-09', { weight: { weightGramsAvg: 72400 } })] },
+    }, '2026-08-09')
+    const entry = endpoints.bodyWeight.weight.find((item: { date: string }) => item.date === '2026-08-09')
+    expect(entry.bmi).toBeNull()
+  })
+
+  it('leaves BMI null when the height is not plausibly centimetres', () => {
+    const endpoints = __test.translateGoogleHealth({
+      profileRaw: { user: { height: 1.78 } },
+      weightDaily: { rollupDataPoints: [daily('2026-08-09', { weight: { weightGramsAvg: 72400 } })] },
+    }, '2026-08-09')
+    const entry = endpoints.bodyWeight.weight.find((item: { date: string }) => item.date === '2026-08-09')
+    expect(entry.bmi).toBeNull()
+  })
+
+  it('ignores an unrecognized response shape rather than throwing', () => {
+    expect(() => __test.translateGoogleHealth({ profileRaw: 'unexpected', goalsRaw: 42, sleepGoalRaw: [], waterGoalRaw: null }, '2026-08-09')).not.toThrow()
+    const endpoints = __test.translateGoogleHealth({ profileRaw: 'unexpected', goalsRaw: 42 }, '2026-08-09')
+    expect(endpoints.activityGoals.goals).toEqual({})
+    expect(endpoints.profileRaw).toBe('unexpected')
+  })
+})
