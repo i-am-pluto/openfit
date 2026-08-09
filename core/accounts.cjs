@@ -93,6 +93,12 @@ function createAccounts({ dataDir, secrets, fs = nodeFs }) {
   return {
     directoryFor,
 
+    // Two distinct outcomes, and callers must keep them distinct. `null` means
+    // one thing only: no account exists for this subject. A record that exists
+    // but cannot be decrypted, or that names a different subject, throws — that
+    // is a tampering or corruption signal, and catching it into `null` would
+    // turn it into an ordinary signed-out response that hides the damage. Let
+    // the throw surface.
     get(sub) {
       const dir = directoryFor(assertSub(sub))
       const record = readOwned(sub, dir)
