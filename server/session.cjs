@@ -55,18 +55,25 @@ function createSessions({ masterKey, secure = false }) {
     return payload
   }
 
-  const attributes = (maxAge) => {
-    const parts = [`Path=/`, 'HttpOnly', 'SameSite=Lax', `Max-Age=${maxAge}`]
+  const attributes = (maxAge, path = '/') => {
+    const parts = [`Path=${path}`, 'HttpOnly', 'SameSite=Lax', `Max-Age=${maxAge}`]
     if (secure) parts.push('Secure')
     return parts
   }
+
+  // Every cookie this server sets goes through here. A second Set-Cookie string
+  // assembled by hand elsewhere is how `Secure` or `HttpOnly` ends up on one
+  // cookie and not the other; there is one attribute list and it lives here.
+  const cookieString = ({ name, value = '', maxAge, path = '/' }) =>
+    [`${name}=${value}`, ...attributes(maxAge, path)].join('; ')
 
   return {
     cookieName: SESSION_COOKIE,
     sign,
     verify,
-    cookie: (payload) => [`${SESSION_COOKIE}=${sign(payload)}`, ...attributes(MAX_AGE_SECONDS)].join('; '),
-    clearCookie: () => [`${SESSION_COOKIE}=`, ...attributes(0)].join('; '),
+    cookieString,
+    cookie: (payload) => cookieString({ name: SESSION_COOKIE, value: sign(payload), maxAge: MAX_AGE_SECONDS }),
+    clearCookie: () => cookieString({ name: SESSION_COOKIE, maxAge: 0 }),
   }
 }
 
