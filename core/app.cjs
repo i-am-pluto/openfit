@@ -156,6 +156,41 @@ function createApp(options = {}) {
       return { reauthorizeUrl: REAUTHORIZE_URL }
     },
 
+    /**
+     * Stores the token the sign-in produced.
+     *
+     * Sign-in and the health scopes come from one Google authorization, so the
+     * token arrives from the login route rather than from a callback this app
+     * owns. Two things it deliberately does not do:
+     *
+     * - It does not replace the stored token wholesale. Google issues a refresh
+     *   token only alongside the consent screen, so an ordinary sign-in returns
+     *   an access token alone; overwriting would drop the refresh token and
+     *   disconnect an account that was working a second ago.
+     * - It does not clear the health cache. The cache lives in this account's
+     *   own directory and belongs to the same subject that just signed in, so
+     *   dropping it would empty the dashboard on every sign-in.
+     */
+    async adoptToken(token) {
+      if (token === null || typeof token !== 'object' || Array.isArray(token)) {
+        throw new Error('adoptToken requires a token payload.')
+      }
+      const stored = credentials.read()
+      // The ID token has done its job at the callback and is a bearer credential
+      // with no further use here; it is not written to disk.
+      const { id_token: _idToken, ...received } = token
+      const merged = { ...stored.token, ...received }
+      if (!merged.refresh_token && stored.token?.refresh_token) merged.refresh_token = stored.token.refresh_token
+      credentials.save({ ...stored, token: merged })
+      const status = credentials.publicStatus()
+      // Other browsers already signed into this account are holding an SSE
+      // stream open; this is what tells them the connection came back. The
+      // payload is the `{ ok }` shape src/App.tsx has always handled — a status
+      // object here reads as `ok: false` and raises "Authorization failed."
+      events.emit('auth-complete', { ok: true })
+      return status
+    },
+
     async disconnect() {
       if (syncInFlight) throw new Error('Wait for the sync to finish before disconnecting the account.')
       const stored = credentials.read()

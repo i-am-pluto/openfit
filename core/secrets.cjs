@@ -95,6 +95,12 @@ function createSecretStore(options = {}) {
       return { encrypted: true, backend: safeStorage ? 'safeStorage' : ALGORITHM }
     },
 
+    // The session signing key is derived from these bytes (see server/session.cjs),
+    // so the raw key has to leave this module. A copy, not the cached buffer: a
+    // caller that overwrote it in place would silently re-key everything this
+    // store has already encrypted.
+    masterKey: () => Buffer.from(key()),
+
     // Reads either envelope version regardless of the preferred write backend, so
     // a data directory stays readable when moved between the desktop app and the
     // server. An envelope this process cannot decrypt yields the fallback and is

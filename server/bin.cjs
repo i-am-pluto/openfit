@@ -4,8 +4,21 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 
-const { createApp } = require('../core/app.cjs')
+const { createAccountRegistry } = require('../core/account-registry.cjs')
+const { createAccounts } = require('../core/accounts.cjs')
+const { createAgentRegistry } = require('../core/agents/index.cjs')
+const { createApp, normalizePublicOrigin } = require('../core/app.cjs')
+const { validateIdToken } = require('../core/identity.cjs')
+const { buildGoogleAuthUrl, exchangeGoogleCode } = require('../core/providers/google-health.cjs')
+const { createSecretStore } = require('../core/secrets.cjs')
+const { loadEnv } = require('./env.cjs')
 const { createServer } = require('./index.cjs')
+const { createSessions } = require('./session.cjs')
+
+// Absolute, not cwd-relative: a service unit with its own WorkingDirectory would
+// otherwise find no .env, fall back to whatever the environment happens to hold,
+// and fail with a message about a variable the operator did set.
+const ENV_FILE = path.resolve(__dirname, '..', '.env')
 
 const DEFAULT_PORT = 7788
 const DEFAULT_HOST = '0.0.0.0'
@@ -52,19 +65,36 @@ function reachableAddresses(host) {
   return [...tailnet, ...rest, ...loopback]
 }
 
-function banner({ addresses, port, token, publicOrigin, dataDir, storageBackend, agents }) {
+// Sign-in only completes on the origin the OAuth client is registered with: the
+// pending cookie is set on the origin the browser started from, and Google sends
+// the callback to the redirect URI. Naming that origin first is the difference
+// between signing in and a "sign-in took too long" page with no stated cause.
+//
+// No URL here carries a token. Browser access is a Google sign-in now, and a
+// tokenised URL printed to a log or a terminal scrollback was a standing
+// credential leak.
+function banner({ addresses, port, publicOrigin, dataDir, storageBackend, agents }) {
+  const signInAt = publicOrigin ? `${publicOrigin}/` : `http://127.0.0.1:${port}/`
+  const others = addresses.map((address) => `http://${address}:${port}/`).filter((url) => url !== signInAt)
+
   const lines = [
     '',
     '  OpenFit server',
     `  data     ${dataDir}`,
     `  storage  ${storageBackend}`,
-    `  agents   ${agents.map((agent) => `${agent.id}${agent.selected ? '*' : ''}${agent.available ? '' : ' (unavailable)'}`).join(', ') || 'none'}`,
+    `  agents   ${agents.map((agent) => `${agent.id}${agent.available ? '' : ' (unavailable)'}`).join(', ') || 'none'}`,
     '',
-    '  Open one of these (the token is stored as a cookie on first visit):',
-    ...addresses.map((address) => `    http://${address}:${port}/?token=${token}`),
+    '  Open this and sign in with Google:',
+    `    ${signInAt}`,
   ]
-  if (publicOrigin) lines.push('', `  OAuth callback origin: ${publicOrigin}/oauth/callback`)
-  else lines.push('', '  Connecting a health account must be done from a browser on this machine.', '  Set OPENFIT_PUBLIC_ORIGIN=https://<host>.ts.net to allow it from other devices.')
+  if (!publicOrigin) {
+    lines.push(
+      '',
+      '  Sign-in only completes from this machine. Set OPENFIT_PUBLIC_ORIGIN=https://<host>.ts.net',
+      '  and register <origin>/auth/callback with the Google client to sign in from other devices.',
+    )
+  }
+  if (others.length) lines.push('', '  Also listening on:', ...others.map((url) => `    ${url}`))
   lines.push('')
   return lines.join('\n')
 }
@@ -81,7 +111,29 @@ function main(argv = process.argv.slice(2), env = process.env) {
     process.exit(1)
   }
 
-  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 })
+  // Configuration is settled before anything is created on disk, so a server
+  // that cannot sign anyone in leaves no data directory and no master key behind.
+  let publicOrigin = null
+  let identity = null
+  try {
+    const configured = loadEnv({ env, path: ENV_FILE })
+    // Validated here rather than at the first request: createApp would otherwise
+    // reject a non-https origin from inside a request handler, long after the
+    // operator stopped watching, and `secure` cookies would already be set on a
+    // plain-http origin where no browser will send them back.
+    publicOrigin = normalizePublicOrigin(configured.publicOrigin)
+    // Frozen because one object is both the login routes' identity and the
+    // per-account app's oauthDefaults: the client that signs a person in and the
+    // client that refreshes their token must not be able to drift apart.
+    identity = Object.freeze({
+      clientId: configured.clientId,
+      clientSecret: configured.clientSecret,
+      redirectUri: `${publicOrigin || `http://127.0.0.1:${port}`}/auth/callback`,
+    })
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exit(1)
+  }
 
   // In development the Vite dev server serves the page and proxies /api here.
   const devMode = args.dev === 'true' || args.dev === '' || env.OPENFIT_DEV === '1'
@@ -90,18 +142,64 @@ function main(argv = process.argv.slice(2), env = process.env) {
     process.exit(1)
   }
 
-  let app
-  try {
-    app = createApp({ dataDir, env, clientVersion: require('../package.json').version })
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error))
-    process.exit(1)
-  }
+  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 })
+
+  // One secret store for the instance. The accounts index and every account's
+  // app read it, so `master.key` stays instance-wide instead of one key per
+  // account directory, and the session signing key is derived from those bytes.
+  const secrets = createSecretStore({ dir: dataDir })
+  const accounts = createAccounts({ dataDir, secrets })
+  const registry = createAccountRegistry({
+    dataDir,
+    secrets,
+    createApp,
+    appOptions: {
+      env,
+      clientVersion: require('../package.json').version,
+      publicOrigin,
+      // Without this the OAuth client falls back to whatever a previous release
+      // wrote into the account's credentials file, and .env is ignored in
+      // silence: the sign-in works and the first token refresh does not.
+      oauthDefaults: identity,
+    },
+  })
+
+  // `Secure` has one source. The login routes check this against the session
+  // store at wiring time, so the two cookies cannot disagree.
+  const secure = Boolean(publicOrigin)
+  const sessions = createSessions({ masterKey: secrets.masterKey(), secure })
 
   const tokenOverride = env.OPENFIT_SERVER_TOKEN
     || (args['token-file'] ? fs.readFileSync(args['token-file'], 'utf8').trim() : null)
 
-  const { server, token } = createServer({ app, staticRoot, dataDir, token: tokenOverride })
+  const { server } = createServer({
+    staticRoot,
+    dataDir,
+    token: tokenOverride,
+    sessions,
+    accounts,
+    registry,
+    loginDeps: {
+      sessions,
+      accounts,
+      identity,
+      secure,
+      validateIdToken,
+      authorizationUrl: ({ state, nonce, challenge, prompt }) => buildGoogleAuthUrl({
+        clientId: identity.clientId,
+        redirectUri: identity.redirectUri,
+        state,
+        nonce,
+        challenge,
+        prompt,
+      }),
+      exchange: (code, verifier) => exchangeGoogleCode({ ...identity, code, verifier }),
+      // The app for the account that just signed in, created on demand. This is
+      // request handling — the callback is a request — so the registry latch is
+      // still open.
+      onAuthorized: (account, tokens) => registry.forAccount(account).adoptToken(tokens),
+    },
+  })
 
   server.on('error', (error) => {
     console.error(error.code === 'EADDRINUSE' ? `Port ${port} is already in use.` : error.message)
@@ -112,11 +210,14 @@ function main(argv = process.argv.slice(2), env = process.env) {
     console.log(banner({
       addresses: reachableAddresses(host),
       port,
-      token,
-      publicOrigin: app.publicOrigin,
+      publicOrigin,
       dataDir,
-      storageBackend: app.getStatus().storageBackend,
-      agents: app.assistant.listAgents(),
+      // Both read without an app. `registry.forAccount` would build one for a
+      // stranger's account at startup — and after shutdown it throws — so the
+      // banner reports the instance, not an account: the storage backend from
+      // the shared secret store and the assistant backends this machine has.
+      storageBackend: secrets.describe().backend,
+      agents: createAgentRegistry({ env }).list(),
     }))
   })
 
@@ -127,9 +228,11 @@ function main(argv = process.argv.slice(2), env = process.env) {
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
 
-  return server
+  // The composed pieces, not just the socket: this is the only place they are
+  // wired together, so it is the only place a test can check that they were.
+  return { server, registry, accounts, sessions }
 }
 
 if (require.main === module) main()
 
-module.exports = { main, parseArgs, defaultDataDir, isTailscaleAddress, reachableAddresses }
+module.exports = { main, banner, parseArgs, defaultDataDir, isTailscaleAddress, reachableAddresses }

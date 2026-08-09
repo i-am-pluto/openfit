@@ -39,21 +39,65 @@ function createPkce() {
   }
 }
 
-function createAuthorizationUrl(config, state, pkce) {
+// One place builds the authorization query, so a parameter can never be present
+// on one path and missing on the other. Callers pass only what varies; anything
+// left undefined is omitted rather than serialized as the string "undefined".
+function authorizationUrl(parameters) {
   const url = new URL(AUTHORIZE_URL)
-  url.search = new URLSearchParams({
-    client_id: config.clientId,
-    redirect_uri: config.redirectUri,
+  const query = new URLSearchParams({
     response_type: 'code',
     scope: SCOPES.join(' '),
     access_type: 'offline',
     include_granted_scopes: 'true',
+    code_challenge_method: 'S256',
+  })
+  for (const [name, value] of Object.entries(parameters)) {
+    if (value === undefined || value === null || value === '') continue
+    query.set(name, String(value))
+  }
+  url.search = query.toString()
+  return url.toString()
+}
+
+function createAuthorizationUrl(config, state, pkce) {
+  return authorizationUrl({
+    client_id: config.clientId,
+    redirect_uri: config.redirectUri,
     prompt: 'consent',
     state,
     code_challenge: pkce.challenge,
-    code_challenge_method: 'S256',
-  }).toString()
-  return url.toString()
+  })
+}
+
+function requireText(value, what) {
+  if (typeof value !== 'string' || value === '') {
+    throw new Error(`A Google authorization URL requires a non-empty ${what}.`)
+  }
+  return value
+}
+
+/**
+ * The authorization request that signs a person in.
+ *
+ * `nonce` is mandatory and checked here rather than left to the caller: Google
+ * omits the claim entirely when the parameter is absent, and core/identity.cjs
+ * rejects an ID token with no nonce. A URL built without one produces a token
+ * that can never validate, so every sign-in would fail at the callback with
+ * nothing in the request to explain why.
+ *
+ * `prompt` is deliberately absent by default. Forcing the consent screen on
+ * every sign-in is noise; the reconnect path asks for it explicitly when a
+ * refresh token is actually needed.
+ */
+function buildGoogleAuthUrl({ clientId, redirectUri, state, nonce, challenge, prompt }) {
+  return authorizationUrl({
+    client_id: requireText(clientId, 'client id'),
+    redirect_uri: requireText(redirectUri, 'redirect uri'),
+    state: requireText(state, 'state'),
+    nonce: requireText(nonce, 'nonce'),
+    code_challenge: requireText(challenge, 'PKCE challenge'),
+    prompt,
+  })
 }
 
 async function tokenRequest(parameters) {
@@ -81,6 +125,12 @@ function exchangeAuthorizationCode(config, code, verifier) {
     grant_type: 'authorization_code',
     code_verifier: verifier,
   })
+}
+
+// Named arguments for the sign-in path: the positional form takes the client and
+// the code in the same shape, and transposing them there is silent.
+function exchangeGoogleCode({ clientId, clientSecret, redirectUri, code, verifier }) {
+  return exchangeAuthorizationCode({ clientId, clientSecret, redirectUri }, code, verifier)
 }
 
 async function refreshAccessToken(config, token) {
@@ -627,7 +677,9 @@ module.exports = {
   scopes: SCOPES,
   createPkce,
   createAuthorizationUrl,
+  buildGoogleAuthUrl,
   exchangeAuthorizationCode,
+  exchangeGoogleCode,
   refreshAccessToken,
   revokeToken,
   syncData: syncGoogleHealthData,

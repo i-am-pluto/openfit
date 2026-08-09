@@ -108,3 +108,79 @@ describe('oauth defaults', () => {
     expect(app.getStatus().clientId).toBe('desktop-client')
   })
 })
+
+describe('adoptToken', () => {
+  const CACHE_FILE = path.join(DATA_DIR, 'health-cache.secure.json')
+
+  const stored = (token: any, extra: Record<string, any> = {}) => ({
+    [CREDENTIAL_FILE]: {
+      config: { provider: 'google-health', clientId: 'c', clientSecret: 's', redirectUri: 'https://box.ts.net/auth/callback', agentId: null },
+      token,
+      lastSyncAt: '2026-08-01T00:00:00.000Z',
+    },
+    ...extra,
+  })
+
+  it('stores the token from the sign-in and reports it connected', async () => {
+    const secrets = fakeSecrets(stored(null))
+    const app = makeApp({ secrets })
+
+    const status = await app.adoptToken({ access_token: 'a1', refresh_token: 'r1', expiresAt: 42 })
+
+    expect(status.connected).toBe(true)
+    expect(secrets.files.get(CREDENTIAL_FILE).token).toMatchObject({ access_token: 'a1', refresh_token: 'r1', expiresAt: 42 })
+  })
+
+  it('keeps the stored refresh token when Google returns none', async () => {
+    // Google issues a refresh token only alongside the consent screen, so an
+    // ordinary sign-in returns an access token alone. Replacing the token
+    // wholesale would disconnect an account that was syncing a moment ago.
+    const secrets = fakeSecrets(stored({ access_token: 'old', refresh_token: 'keep-me' }))
+    const app = makeApp({ secrets })
+
+    await app.adoptToken({ access_token: 'new' })
+
+    expect(secrets.files.get(CREDENTIAL_FILE).token).toMatchObject({ access_token: 'new', refresh_token: 'keep-me' })
+  })
+
+  it('does not persist the id token', async () => {
+    const secrets = fakeSecrets(stored(null))
+    const app = makeApp({ secrets })
+
+    await app.adoptToken({ access_token: 'a1', id_token: 'header.payload.signature' })
+
+    expect(secrets.files.get(CREDENTIAL_FILE).token).not.toHaveProperty('id_token')
+  })
+
+  it('leaves the cached health data and last sync alone', async () => {
+    // The cache lives in this account's own directory and belongs to the subject
+    // that just signed in. Clearing it would empty the dashboard on every login.
+    const secrets = fakeSecrets(stored({ access_token: 'old' }, { [CACHE_FILE]: { days: { '2026-08-01': {} } } }))
+    const app = makeApp({ secrets })
+
+    const status = await app.adoptToken({ access_token: 'new' })
+
+    expect(secrets.files.has(CACHE_FILE)).toBe(true)
+    expect(status.lastSyncAt).toBe('2026-08-01T00:00:00.000Z')
+  })
+
+  it('announces the new connection to open streams', async () => {
+    const app = makeApp({ secrets: fakeSecrets(stored(null)) })
+    const seen: Array<any> = []
+    app.events.on('auth-complete', (payload: any) => seen.push(payload))
+
+    await app.adoptToken({ access_token: 'a1' })
+
+    // src/App.tsx reads `result.ok`; anything else raises a spurious
+    // "Authorization failed." toast on a sign-in that worked.
+    expect(seen).toEqual([{ ok: true }])
+  })
+
+  it('refuses anything that is not a token payload', async () => {
+    const app = makeApp({ secrets: fakeSecrets(stored({ access_token: 'old' })) })
+
+    for (const value of [null, undefined, 'a1', 42, ['a1']]) {
+      await expect(app.adoptToken(value)).rejects.toThrow(/token payload/)
+    }
+  })
+})
