@@ -1,4 +1,4 @@
-import type { KeyboardEvent, ReactNode } from 'react'
+import type { CSSProperties, KeyboardEvent, ReactNode } from 'react'
 import { Card, CardAction, CardHeader } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
 import { formatNumber } from '@/lib/format'
@@ -13,9 +13,13 @@ interface PanelProps {
   category?: 'activity' | 'heart' | 'sleep' | 'recovery' | 'body' | 'device'
   onClick?: () => void
   ariaLabel?: string
+  /** Chart panels set `order` here so favourites float to the top of their grid. */
+  style?: CSSProperties
+  /** Marks a favourited panel for styling — a signal that does not rely on colour alone. */
+  favourite?: boolean
 }
 
-export function Panel({ children, className, tone = 'default', category, onClick, ariaLabel }: PanelProps) {
+export function Panel({ children, className, tone = 'default', category, onClick, ariaLabel, style, favourite }: PanelProps) {
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!onClick || (event.key !== 'Enter' && event.key !== ' ')) return
     event.preventDefault()
@@ -26,6 +30,8 @@ export function Panel({ children, className, tone = 'default', category, onClick
     <Card
       className={cn('panel', `tone-${tone}`, onClick && 'is-clickable', className)}
       data-category={category}
+      data-favourite={favourite ? 'true' : undefined}
+      style={style}
       onClick={onClick}
       onKeyDown={onKeyDown}
       role={onClick ? 'button' : undefined}

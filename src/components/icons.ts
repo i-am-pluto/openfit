@@ -39,6 +39,7 @@ export {
   IconSlidersFillDuo18 as MenuIcon,
   IconSparkle3FillDuo18 as SparkleIcon,
   IconSquareDottedArrowBottomRightFillDuo18 as ExternalIcon,
+  IconStarFillDuo18 as FavouriteIcon,
   IconStopwatchFillDuo18 as DurationIcon,
   IconTargetFillDuo18 as StepsIcon,
   IconUserFillDuo18 as UserIcon,

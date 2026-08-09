@@ -3537,3 +3537,69 @@ input:focus-visible,
   .sync-error-list li,
   .profile-prompt-list li { grid-template-columns: 1fr; }
 }
+
+/* Chart panel header actions. Explain hands the chart to the assistant;
+   Favourite pins it to the top of its section. Both sit in the header's action
+   slot beside whatever badge the panel already showed, never in place of it. */
+.chart-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.chart-panel-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  color: var(--muted-foreground);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 510;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+
+.chart-panel-action svg { width: 13px; height: 13px; }
+.chart-panel-action:hover:not(:disabled) { color: var(--foreground); border-color: var(--ring); background: var(--accent); }
+.chart-panel-action:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.chart-panel-action:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.chart-panel-action.is-favourite { padding: 4px 6px; }
+.chart-panel-action.is-favourite svg { width: 14px; height: 14px; }
+
+/* A favourited star is solid rather than duo-toned, so the state reads without
+   relying on the colour shift beside it. */
+.chart-panel-action.is-on {
+  color: var(--color-amber);
+  border-color: color-mix(in srgb, var(--color-amber) 42%, transparent);
+  background: color-mix(in srgb, var(--color-amber) 14%, transparent);
+}
+
+.chart-panel-action.is-on svg,
+.chart-panel-action.is-on svg * { fill: currentColor; fill-opacity: 1; opacity: 1; }
+.chart-panel-action.is-on:hover { background: color-mix(in srgb, var(--color-amber) 22%, transparent); }
+
+/* The favourited panel itself is outlined and carries a corner marker, so the
+   pinned charts are findable at a glance and not by colour alone. */
+.panel[data-favourite="true"] {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-amber) 40%, transparent);
+}
+
+.panel[data-favourite="true"]::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  border-top: 12px solid color-mix(in srgb, var(--color-amber) 65%, transparent);
+  border-right: 12px solid transparent;
+  border-top-left-radius: var(--radius-xl);
+  pointer-events: none;
+}
