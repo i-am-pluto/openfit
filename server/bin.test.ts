@@ -12,6 +12,8 @@ const bin = require('./bin.cjs') as {
   main: (argv: string[], env: Record<string, string>) => { server: any; registry: any; accounts: any; sessions: any }
   banner: (options: Record<string, any>) => string
 }
+const { accountId } = require('../core/accounts.cjs') as { accountId: (sub: string) => string }
+const { createSecretStore } = require('../core/secrets.cjs') as { createSecretStore: (o: any) => any }
 
 const BIN = require.resolve('./bin.cjs')
 const ENV_FILE = path.resolve(BIN, '..', '..', '.env')
@@ -82,6 +84,38 @@ async function start(extraEnv: Record<string, string> = {}) {
   return { ...started, port, dataDir, logs, origin: `http://127.0.0.1:${port}` }
 }
 
+/**
+ * Answers Google's token endpoint and lets every other request through.
+ *
+ * The server under test runs in this process, so a blanket `fetch` stub would
+ * also swallow the requests this file makes to drive it. Only the token URL is
+ * intercepted; nothing here reaches the network.
+ */
+function stubGoogleTokenEndpoint(payload: Record<string, unknown>) {
+  const realFetch = globalThis.fetch
+  const bodies: URLSearchParams[] = []
+  vi.stubGlobal('fetch', async (input: any, init: any = {}) => {
+    if (!String(input).startsWith('https://oauth2.googleapis.com/token')) return realFetch(input, init)
+    bodies.push(new URLSearchParams(String(init.body)))
+    return { ok: true, json: async () => payload }
+  })
+  cleanups.push(() => vi.unstubAllGlobals())
+  return bodies
+}
+
+// Unsigned on purpose: core/identity.cjs documents why it validates claims
+// without verifying the signature for a token taken straight from the token
+// endpoint over TLS. This is the payload Google would have returned.
+function idToken(claims: Record<string, unknown>) {
+  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url')
+  return `${part({ alg: 'RS256', typ: 'JWT' })}.${part(claims)}.signature`
+}
+
+// getSetCookie keeps the headers separate; the joined form would have to be
+// re-split on commas that also appear inside cookie attributes.
+const cookieValue = (response: Response, name: string) =>
+  response.headers.getSetCookie().map((entry) => entry.split(';')[0]).find((pair) => pair.startsWith(`${name}=`)) ?? ''
+
 describe('server entry point', () => {
   it('serves the login page to an anonymous visitor', async () => {
     const { origin } = await start()
@@ -124,6 +158,72 @@ describe('server entry point', () => {
     expect(status.clientId).toBe('test-client')
     expect(status.redirectUri).toBe(`http://127.0.0.1:${port}/auth/callback`)
     expect(status.hasClientSecret).toBe(true)
+  })
+
+  it('stores the exchanged token against the account the callback signed in', async () => {
+    // The one composition edge nothing else reaches: server/routes/login.test.ts
+    // injects its own onAuthorized, and every other test here stops at the
+    // redirect to Google. Break the `onAuthorized` wire in server/bin.cjs and
+    // this is the test that goes red.
+    const { origin, dataDir, registry } = await start()
+    const sub = 'google-sub-1'
+    const id = accountId(sub)
+    const dir = path.join(dataDir, 'accounts', id)
+
+    // The registry caches by account id, so the app the callback reaches is this
+    // one; listening now is the only way to see the event it emits.
+    const announced: unknown[] = []
+    registry.forAccount({ id, dir }).events.on('auth-complete', (payload: unknown) => announced.push(payload))
+
+    const login = await fetch(`${origin}/auth/login`, { redirect: 'manual' })
+    const authorize = new URL(String(login.headers.get('location')))
+    const pending = cookieValue(login, 'openfit_pending')
+
+    const exchanges = stubGoogleTokenEndpoint({
+      access_token: 'access-1',
+      refresh_token: 'refresh-1',
+      expires_in: 3600,
+      id_token: idToken({
+        iss: 'https://accounts.google.com',
+        aud: 'test-client',
+        nonce: authorize.searchParams.get('nonce'),
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        sub,
+        email: 'ada@example.com',
+        email_verified: true,
+      }),
+    })
+
+    const callback = await fetch(
+      `${origin}/auth/callback?code=auth-code&state=${authorize.searchParams.get('state')}`,
+      { redirect: 'manual', headers: { cookie: pending } },
+    )
+
+    // A session at all means the whole chain ran: login.cjs:154 catches a
+    // failing onAuthorized and answers 500 without issuing one.
+    expect(callback.status).toBe(302)
+    expect(callback.headers.get('location')).toBe('/')
+    expect(cookieValue(callback, 'openfit_session')).toMatch(/^openfit_session=v1\./)
+
+    // The code and verifier reached Google's token endpoint.
+    expect(Object.fromEntries(exchanges[0])).toMatchObject({
+      code: 'auth-code',
+      grant_type: 'authorization_code',
+      client_id: 'test-client',
+      client_secret: 'test-secret',
+    })
+    expect(exchanges[0].get('code_verifier')).toBeTruthy()
+
+    // And the token was stored, encrypted, in this account's own directory.
+    const file = path.join(dir, 'credentials.secure.json')
+    expect(fs.existsSync(file)).toBe(true)
+    expect(JSON.parse(fs.readFileSync(file, 'utf8')).encrypted).toBe(true)
+    const stored = createSecretStore({ dir: dataDir }).read(file, null)
+    expect(stored.token).toMatchObject({ access_token: 'access-1', refresh_token: 'refresh-1' })
+    expect(stored.token).not.toHaveProperty('id_token')
+
+    // Requirement 9: the renderer's live update has a publisher again.
+    expect(announced).toEqual([{ ok: true }])
   })
 
   it('signs its session cookies with the instance master key', async () => {
