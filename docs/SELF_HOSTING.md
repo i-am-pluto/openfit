@@ -186,6 +186,21 @@ Each Google account that signs in gets its own encrypted directory under
 credentials, health archive, and account record. One server can host several
 people without either seeing the other's data.
 
+### Upgrading from a single-user install
+
+**You will reconnect from scratch.** A data directory written before sign-in
+existed holds `credentials.secure.json` and `health-cache.secure.json` at its
+root, outside any account. Nothing adopts them: the files stay on disk, they are
+never read, and the first account to sign in starts empty. Click **Reconnect**,
+consent again, and re-sync.
+
+That data is not handed to whoever signs in first on purpose. Being first proves
+nothing about being the owner, and an earlier build gave a stranger the previous
+owner's Google refresh token and entire health archive that way — by moving the
+files, so they could not be handed back. If you want the old archive, export it
+from the previous release before upgrading; once you have reconnected, the
+root-level files are dead weight and can be deleted.
+
 ### Signing out
 
 The account menu offers two actions:
@@ -196,6 +211,15 @@ The account menu offers two actions:
   account. This is the only revocation mechanism there is — use it if you lose a
   device. OpenFit reports an error rather than a success if the epoch was not
   actually bumped.
+
+It reaches connections that are already open, not only the next request. A live
+event stream — the one that pushes sync progress and assistant replies —
+re-checks the account on its 25-second heartbeat and closes itself when the epoch
+no longer matches, so a browser left open on a lost laptop stops receiving that
+account's data rather than being served until someone closes the tab.
+
+The bearer token is not covered by any of this: it is a file, and revoking it
+means replacing `<data-dir>/server-token`.
 
 Sessions also expire on their own after 30 days, enforced server-side from the
 signed timestamp inside the cookie rather than from its `Max-Age`.
@@ -307,11 +331,18 @@ Two independent ways in, with different reach:
 | Credential | Reaches | Notes |
 | --- | --- | --- |
 | Google session cookie | the app shell and every `/api/*` route | Issued by signing in. `HttpOnly`, `SameSite=Lax`, signed with a key derived from `master.key`. |
-| Server token | `/api/*` **only** | For automation. A browser holding one still gets the sign-in page for any page request. |
+| Server token | `/api/*` **only** | For automation. Accepted **only** as an `Authorization: Bearer` header. A browser holding one still gets the sign-in page for any page request. |
 
 The server generates a 32-byte token on first run and stores it at
 `<data-dir>/server-token` with `0600` permissions. Present it as an
-`Authorization: Bearer` header; comparison is constant-time.
+`Authorization: Bearer` header; comparison is constant-time. There is no other
+way to present it. `?token=…` is not read — a token in a URL is copied into
+access logs, browser history and `Referer` headers — and neither is the
+`openfit_token` cookie an older release set for a year on any tokenized page
+request. That cookie named no account and carried no epoch, so *sign out
+everywhere* could never revoke it; the sign-in page and `POST /auth/logout` now
+send an expiry for it, so a browser upgrading from that release drops it on its
+next visit.
 
 ```bash
 TOKEN="$(cat ~/.local/share/openfit/server-token)"
@@ -418,7 +449,7 @@ both reuse their own local login, and OpenFit never stores an API key.
 | The sign-in page comes back instead of the dashboard | The session cookie is missing, expired, or revoked by a *sign out everywhere*. Sign in again. |
 | `Sign-in took too long. Start again.` | The pending cookie is older than 10 minutes, or the browser started at one origin and Google returned to another. Start from the origin registered with the OAuth client. |
 | `redirect_uri_mismatch` at Google | The registered redirect URI is not `<origin>/auth/callback` for the origin you started from. |
-| `401 Unauthorized` from `curl` | The bearer token is wrong, or you sent it as `?token=…` to a page rather than an `/api/*` route. |
+| `401 Unauthorized` from `curl` | The bearer token is wrong, or it was not sent as an `Authorization: Bearer` header. `?token=…` and the old `openfit_token` cookie are no longer accepted anywhere. |
 | `409` from `curl` with a list of addresses | More than one account has signed in. Add `X-OpenFit-Account: you@example.com`. |
 | `dist/index.html is missing` | Run `npm run build` first, or use `npm run serve`. |
 | `Port 7788 is already in use` | Another instance is running, or pick a different `--port`. |

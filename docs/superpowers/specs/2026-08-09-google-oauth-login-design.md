@@ -192,14 +192,20 @@ secret store at the data-directory root and passes it to every per-account app.
 
 ### Migration
 
-If root-level `credentials.secure.json` or `health-cache.secure.json` exist and
-`accounts/` does not, the first sign-in adopts them into that account's
-directory. Without this, a health connection made before this ships would be
-orphaned.
+There is none, deliberately. Root-level `credentials.secure.json` and
+`health-cache.secure.json` written before accounts existed are left on disk and
+never read; a health connection made before this ships is orphaned and the user
+reconnects.
 
-Adoption is conditional on `accounts/` being absent. Once any account exists,
-root-level files are left untouched rather than grafted onto whichever account
-happens to sign in next.
+This section previously specified adopting those files into the first account to
+sign in, gated on `accounts/` being absent. That contradicted this document's own
+safety argument. "First to sign in" is not an identity check — it is the same
+reasoning rejected under *Bearer token and account context*, where silently
+choosing an account is called out as the mechanism by which one person reads
+another's health data. Adoption did worse than choose: it moved the previous
+owner's Google refresh token and whole health archive into a stranger's
+directory, irreversibly, if that stranger reached the instance first. The human
+partner ruled it removed rather than gated, and no opt-in variant replaces it.
 
 ### Bearer token and account context
 
@@ -298,9 +304,10 @@ rejected; tampered signature rejected; epoch mismatch rejected; the same
 
 `core/accounts.test.ts` — `sub` to directory mapping is stable; directories are
 created `0700`; a second account receives a separate directory; epoch increments
-persist. Migration is covered in both directions: a root-level
-`credentials.secure.json` is adopted when `accounts/` is absent, and is not
-adopted when it exists.
+persist. One test pins the absence of migration: root-level
+`credentials.secure.json` and `health-cache.secure.json` are still on disk,
+byte for byte, after the first sign-in and after a later one, and neither
+account directory holds anything but its own `account.json`.
 
 A hostile `sub` containing `../` is tested explicitly. Traversal is already
 impossible because the directory name is a hash, and the test pins that property
@@ -356,10 +363,11 @@ fetched directly from Google over TLS. If a future change ever accepts an ID
 token from the client, that reasoning collapses. The rationale is recorded in a
 comment at the validation site, not only in this document.
 
-Adopting root-level data on first sign-in runs exactly once and is difficult to
-undo if it picks the wrong account. It is gated on `accounts/` being absent,
-which makes the wrong-account case impossible in practice, but the migration
-should log what it moved.
+Dropping adoption means anyone upgrading a single-user install reconnects Google
+Health and re-syncs. That cost is accepted: the alternative handed the previous
+owner's refresh token and health archive to whoever signed in first, and being
+first is not an identity. `docs/SELF_HOSTING.md` states the consequence plainly
+so the reconnection is expected rather than read as data loss.
 
 The instance depends on Google being reachable to sign in. The bearer token
 remains as the break-glass path for `/api/*`, but the dashboard itself is

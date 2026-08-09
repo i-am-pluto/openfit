@@ -92,10 +92,13 @@ every account's app share one secret store, injected into `createApp` by
 refuses to rebind an id to a second directory, so one signed-in person's app can
 never be handed to another.
 
-The first sign-in on a data directory that predates accounts adopts the existing
-root-level `credentials.secure.json` and `health-cache.secure.json` into its own
-directory. That is gated on `accounts/` being absent, so it can only ever run
-once.
+Nothing is inherited across the upgrade. A data directory that predates accounts
+keeps its root-level `credentials.secure.json` and `health-cache.secure.json`
+exactly where they are, and no account ever reads them. An earlier revision moved
+them into the first account to sign in; "first to sign in" is not a proof of
+identity, so a stranger reaching the instance ahead of its owner was handed that
+person's Google refresh token and whole health archive — moved, not copied.
+Upgrading means reconnecting Google Health once and re-syncing.
 
 ## The session boundary
 
@@ -104,6 +107,7 @@ Two credentials exist and they do not reach the same things.
 | | Google session cookie | Server bearer token |
 | --- | --- | --- |
 | Obtained by | signing in with Google | generated at `<data-dir>/server-token`, `0600` |
+| Presented as | the `openfit_session` cookie | an `Authorization: Bearer` header, and nothing else |
 | Reaches | the app shell **and** `/api/*` | `/api/*` **only** |
 | Names an account | yes, by `sub` | no — resolves to the sole account, or requires `X-OpenFit-Account` |
 | Revocable | yes, by bumping the account epoch | only by replacing the file |
@@ -124,6 +128,17 @@ the browser and a captured value would otherwise be valid forever.
 was issued under; every request compares it to the stored one with strict
 integer equality, and `POST /auth/logout` with `{"everywhere": true}` increments
 the stored value. There is no session list to walk and nothing to expire.
+
+"Every request" is not enough on its own for `/api/events`, which is one request
+that never ends. That handler re-runs the same resolution on its 25-second
+heartbeat and closes the stream unless the identical account still resolves
+cleanly, so a revoked browser stops receiving sync progress and assistant output
+instead of being served until the tab is closed.
+
+The `?token=` query parameter and the year-long `openfit_token` cookie that a
+pre-sign-in release set are both gone. Neither named an account, so neither could
+be revoked by an epoch bump; the sign-in page and `POST /auth/logout` send an
+expiry for the cookie so upgraded browsers stop carrying it.
 
 Sign-in itself is one Google authorization for both identity and health scopes.
 `GET /auth/login` mints `state`, `nonce`, and a PKCE verifier, signs them into a
