@@ -100,7 +100,9 @@ Do not select write scopes. OpenFit also requests the standard `openid` and `pro
    http://127.0.0.1:7788/auth/callback
    ```
 
-   Add a second entry if you will also reach OpenFit over an HTTPS tailnet origin:
+   Add `http://127.0.0.1:7789/auth/callback` too if you will develop with `npm run dev`; `dev:api` listens on 7789, which is a different origin.
+
+   Add another entry if you will also reach OpenFit over an HTTPS tailnet origin:
 
    ```text
    https://your-host.tail-abc123.ts.net/auth/callback

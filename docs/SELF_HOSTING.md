@@ -32,15 +32,28 @@ $EDITOR .env    # fill in the client ID and secret from Google Cloud
 its own `WorkingDirectory` still finds it. Variables already present in the
 process environment are used as-is, so systemd can supply them instead.
 
-The authorized redirect URI to register in Google Cloud is
-`<origin>/auth/callback` — `http://127.0.0.1:7788/auth/callback` for a local
-server on the default port, and `https://<host>.ts.net/auth/callback` when
-`OPENFIT_PUBLIC_ORIGIN` is set. Register both if you use both.
+### Redirect URIs to register
 
-### `npm run dev` fails without `.env`
+The server does not choose one redirect URI; it derives one from the origin it is
+running on, and Google will only accept a callback it was told about in advance.
+Register every origin you will actually use:
 
-`npm run dev` runs three processes under `concurrently -k`. `dev:api` is the
-server, and without `OPENFIT_GOOGLE_CLIENT_ID` it prints one line and exits 1:
+| How you run OpenFit | Origin | Register in Google Cloud |
+| --- | --- | --- |
+| `npm run serve` on this machine | `http://127.0.0.1:7788` | `http://127.0.0.1:7788/auth/callback` |
+| `npm run dev` (the API listens on **7789**) | `http://127.0.0.1:7789` | `http://127.0.0.1:7789/auth/callback` |
+| Behind `tailscale serve`, `OPENFIT_PUBLIC_ORIGIN` set | that origin | `https://<host>.ts.net/auth/callback` |
+
+A different `--port` means a different origin and therefore another entry. This
+is also why `redirect_uri_mismatch` is the most common first-run error.
+
+### `npm run dev`
+
+Two things bite, in this order.
+
+**Without `.env` it exits immediately.** `npm run dev` runs three processes under
+`concurrently -k`. `dev:api` is the server, and without
+`OPENFIT_GOOGLE_CLIENT_ID` it prints one line and exits 1:
 
 ```text
 OPENFIT_GOOGLE_CLIENT_ID is not set. Add it to .env or the service environment.
@@ -48,7 +61,23 @@ OPENFIT_GOOGLE_CLIENT_ID is not set. Add it to .env or the service environment.
 
 `-k` then sends `SIGTERM` to the other two, so Vite and Electron die with it and
 the whole command exits non-zero. There is nothing wrong with your Node version
-or your install — create `.env` first.
+or your install.
+
+**`.env` alone is not enough to sign in from the dev server.** `dev:api` listens
+on port **7789**, not 7788, so the redirect URI it computes is
+`http://127.0.0.1:7789/auth/callback`. Register that exact URI on the same OAuth
+client, in addition to the 7788 one, or Google refuses the sign-in with
+`redirect_uri_mismatch`.
+
+Vite serves the page on `http://127.0.0.1:5173` and proxies both `/api` and
+`/auth` to `dev:api`, so signing in and out work from the dev origin. Session
+cookies are not scoped by port, so the cookie Google's callback sets on
+`127.0.0.1:7789` is sent on `127.0.0.1:5173` too. The callback itself lands on
+7789; go back to 5173 afterwards.
+
+`npm run dev` also starts Electron, which does not run on this branch (see the
+note at the top). `npm run dev:api` and `npm run dev:web` in two terminals give
+you the same server and dev page without it.
 
 ## Start the server
 

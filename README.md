@@ -60,6 +60,13 @@ Then open the URL the banner prints and sign in with Google.
 > The whole command exits non-zero with no other explanation. Create `.env`
 > first. See [*Connect Google Health*](#connect-google-health) for where the
 > values come from.
+>
+> **`.env` alone does not make dev sign-in work.** `dev:api` listens on port
+> **7789**, so its redirect URI is `http://127.0.0.1:7789/auth/callback` — a
+> different origin from `npm run serve`. Register that URI on the same OAuth
+> client too, or Google answers with `redirect_uri_mismatch`. `npm run dev` also
+> starts Electron, which does not run on this branch; `npm run dev:api` and
+> `npm run dev:web` in two terminals avoid it.
 
 Full setup, access control, sign-out, and `systemd` notes are in the
 [self-hosting guide](docs/SELF_HOSTING.md).
@@ -143,15 +150,17 @@ Do not add write scopes. OpenFit also requests the standard `openid` and `profil
 2. Create an OAuth client of type **Web application**.
 3. Name it `OpenFit`.
 4. Leave **Authorized JavaScript origins** empty.
-5. Add an **Authorized redirect URI** of `<origin>/auth/callback`, where
-   `<origin>` is the address you will open OpenFit at. For a local server on the
-   default port:
+5. Add an **Authorized redirect URI** of `<origin>/auth/callback` for every
+   origin you will open OpenFit at. For a local server on the default port:
 
    ```text
    http://127.0.0.1:7788/auth/callback
    ```
 
-   Add a second entry if you also reach OpenFit over an HTTPS tailnet origin:
+   Add `http://127.0.0.1:7789/auth/callback` as well if you develop with
+   `npm run dev` — `dev:api` listens on 7789, so that is a different origin.
+
+   Add a third entry if you also reach OpenFit over an HTTPS tailnet origin:
 
    ```text
    https://your-host.tail-abc123.ts.net/auth/callback

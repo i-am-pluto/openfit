@@ -33,7 +33,11 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       '/api': withDevToken,
-      '/oauth': withDevToken,
+      // Sign-in, the Google callback, and sign-out all live under /auth. Without
+      // this Vite answers them with the SPA shell, so Reconnect reloads the page
+      // and does nothing and both sign-out buttons 404 — silently, because a 200
+      // of HTML is not an error the renderer can see.
+      '/auth': withDevToken,
     },
   },
 })
