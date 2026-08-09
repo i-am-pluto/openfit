@@ -4,7 +4,7 @@
 
 <h1 align="center">OpenFit</h1>
 
-OpenFit is a private dashboard for Google Fitbit Air and other Fitbit devices. It runs as an Electron desktop app or as a small self-hosted server you can reach from your phone over Tailscale. Its adaptive interface prioritizes a small set of useful insights and only displays views, metrics, and navigation when Google Health returns real data.
+OpenFit is a private dashboard for Google Fitbit Air and other Fitbit devices. It runs as a small self-hosted server you sign in to with Google and can reach from your phone over Tailscale. Its adaptive interface prioritizes a small set of useful insights and only displays views, metrics, and navigation when Google Health returns real data.
 
 <p align="center">
   <img src="public/openfit-screenshot.webp" alt="OpenFit desktop dashboard screenshot" width="960">
@@ -12,7 +12,12 @@ OpenFit is a private dashboard for Google Fitbit Air and other Fitbit devices. I
 
 The renderer uses React, shadcn/Radix, Tailwind CSS v4, assistant-ui, Inter Variable, JetBrains Mono, and Nucleo Essential Outline icons.
 
-> Project status: the application is complete and buildable. Demo mode works without configuration. Accessing personal data requires an OAuth client in your own Google Cloud project.
+> Project status: the server is complete and buildable. Signing in requires an OAuth client in your own Google Cloud project, supplied through `.env`.
+>
+> **The Electron desktop app does not run on this branch.** `electron/main.cjs`
+> still builds the HTTP server the old way and has not been updated for Google
+> sign-in, so it fails at startup. `npm run dev:electron`, `npm run capture:ui`,
+> and `npm run dist` are all affected. Use `npm run serve`.
 
 ## How Fitbit data reaches OpenFit
 
@@ -27,7 +32,7 @@ Fitbit Air -> Bluetooth -> Fitbit/Google Health mobile app
 
 OpenFit uses **Google Health API v4** as its default provider. The legacy Fitbit Web API remains available only as a transitional adapter and is scheduled for deprecation in September 2026.
 
-The desktop application can replace the browsing and analysis experience, but it cannot perform initial device pairing, firmware updates, or phone-to-device synchronization.
+OpenFit can replace the browsing and analysis experience, but it cannot perform initial device pairing, firmware updates, or phone-to-device synchronization.
 
 ## Quick start
 
@@ -37,40 +42,41 @@ Requirements:
 - npm 10 or later;
 - Codex Desktop or Claude Code, only if you want to use the health assistant. OpenFit reuses whichever local login you already have and never needs an API key. See [assistant backends](docs/AGENTS.md).
 
+**A `.env` file is required before anything will start.** The server reads its
+Google OAuth client from the environment and exits with status 1 without it.
+
 ```bash
 npm install
-npm run dev
-```
-
-### Run it as a server
-
-To use OpenFit from your phone or another machine on the same tailnet:
-
-```bash
+cp .env.example .env
+$EDITOR .env          # OPENFIT_GOOGLE_CLIENT_ID and OPENFIT_GOOGLE_CLIENT_SECRET
 npm run serve
 ```
 
-This builds the renderer and starts the HTTP server, printing one URL per
-reachable address with Tailscale addresses first. Open the tailnet URL on your
-phone; the access token moves into a cookie on first visit. Full setup, access
-control, and `systemd` notes are in the [self-hosting guide](docs/SELF_HOSTING.md).
+Then open the URL the banner prints and sign in with Google.
 
-The desktop app and the server run the same backend — Electron starts that
-server on loopback and opens a window onto it — so there is one implementation
-to keep correct, not two.
+> **`npm run dev` fails immediately without `.env`.** `dev:api` prints
+> `OPENFIT_GOOGLE_CLIENT_ID is not set` and exits 1, and because the three dev
+> processes run under `concurrently -k`, Vite and Electron are killed with it.
+> The whole command exits non-zero with no other explanation. Create `.env`
+> first. See [*Connect Google Health*](#connect-google-health) for where the
+> values come from.
+
+Full setup, access control, sign-out, and `systemd` notes are in the
+[self-hosting guide](docs/SELF_HOSTING.md).
 
 Useful commands:
 
 ```bash
 npm run build       # Type-check and bundle the renderer
-npm run serve       # Build, then host on the local network
+npm run serve       # Build, then host on the local network (needs .env)
 npm test            # Run normalizer, adapter, agent, and server tests
 npm run check       # Type-check, syntax-check, test, and build
-npm run capture:ui  # Run desktop/mobile visual QA in Electron Chromium
-npm run dist        # Package the app for macOS, Windows, or Linux
+npm run capture:ui  # Electron visual QA — broken on this branch, see the status note
+npm run dist        # Package the desktop app — broken on this branch, see the status note
 ```
 
-Packages generated locally in `release/` are unsigned unless an Apple Developer ID certificate is available in the Keychain. For public distribution, follow the [release checklist](docs/RELEASE.md).
+Packaging is documented in the [release checklist](docs/RELEASE.md), but produces
+a non-starting app until the Electron composition root is updated.
 
 ## Connect Google Health
 
@@ -81,9 +87,14 @@ You need:
 - the Google account used by the Fitbit mobile app;
 - access to [Google Cloud Console](https://console.cloud.google.com/);
 - Fitbit Air or another supported tracker already paired and synchronized with the Fitbit app;
-- OpenFit running with `npm run dev` or as an installed desktop application.
+- a checkout of this repository; the OAuth client is configured in `.env`, not in the app.
 
 API configuration, OAuth consent, and OAuth credentials must all belong to the same Google Cloud project.
+
+Signing in to OpenFit and granting it health access are **one** Google
+authorization. There is no separate step where you connect a health account
+after signing in: the same consent covers the `openid` identity scopes and the
+read-only Google Health scopes.
 
 ### 1. Create a Google Cloud project
 
@@ -130,41 +141,75 @@ Do not add write scopes. OpenFit also requests the standard `openid` and `profil
 
 1. Open [Google Auth Platform clients](https://console.cloud.google.com/auth/clients).
 2. Create an OAuth client of type **Web application**.
-3. Name it `OpenFit Desktop`.
+3. Name it `OpenFit`.
 4. Leave **Authorized JavaScript origins** empty.
-5. Add this exact **Authorized redirect URI**:
+5. Add an **Authorized redirect URI** of `<origin>/auth/callback`, where
+   `<origin>` is the address you will open OpenFit at. For a local server on the
+   default port:
 
    ```text
-   http://127.0.0.1:42813/oauth/callback
+   http://127.0.0.1:7788/auth/callback
+   ```
+
+   Add a second entry if you also reach OpenFit over an HTTPS tailnet origin:
+
+   ```text
+   https://your-host.tail-abc123.ts.net/auth/callback
    ```
 
 6. Create the client and retain its Client ID and Client Secret.
 
-Do not commit or share these credentials. During authorization, OpenFit starts a temporary loopback server on port `42813`, validates OAuth `state` and PKCE, receives the authorization code, and then closes the server.
+OpenFit no longer opens a loopback listener of its own; the callback is a route
+on the OpenFit server itself, and `state`, `nonce`, and PKCE are validated
+there. Do not commit or share these credentials.
 
-### 6. Connect OpenFit
+### 6. Write `.env` and sign in
 
-1. Start OpenFit.
-2. Click **Connect Fitbit** and select **Google Health**.
-3. Paste the Client ID and Client Secret.
-4. Confirm that the callback URL is `http://127.0.0.1:42813/oauth/callback`.
-5. Click **Save and connect**.
-6. In the system browser, select the same Google account that you added as a test user and approve the requested access.
-7. Return to OpenFit. The first synchronization starts automatically.
+1. `cp .env.example .env` and fill in:
 
-The connection is working when OpenFit shows **Google Health** instead of **Demo mode**, displays a last synchronization time, and begins showing real device and health metrics. Metric availability depends on the device, region, granted consent, and recent Fitbit mobile synchronization.
+   ```bash
+   OPENFIT_GOOGLE_CLIENT_ID=…apps.googleusercontent.com
+   OPENFIT_GOOGLE_CLIENT_SECRET=…
+   # Only when you front the server with HTTPS, e.g. via `tailscale serve`:
+   # OPENFIT_PUBLIC_ORIGIN=https://your-host.tail-abc123.ts.net
+   ```
+
+2. `npm run serve`, then open the URL the banner prints. Start from the origin
+   whose `/auth/callback` you registered — sign-in cannot complete anywhere else.
+3. Click **Sign in with Google** and choose the account you added as a test user.
+4. Approve the requested access. One consent grants both sign-in and read-only
+   health access.
+5. You land on the dashboard and the first synchronization starts automatically.
+
+OpenFit never asks for a Client ID or Client Secret in the interface. The
+endpoint that used to accept them is gone.
+
+The connection is working when OpenFit shows **Google Health** instead of **Demo data**, displays a last synchronization time, and begins showing real device and health metrics. Metric availability depends on the device, region, granted consent, and recent Fitbit mobile synchronization.
 
 ### Security note
 
-The Client Secret, OAuth tokens, and health cache stay in Electron's main process and are encrypted with `safeStorage` using Keychain on macOS, Credential Manager on Windows, or an available secret store on Linux. They are not exposed to the renderer or written to the repository.
+The Client Secret is read from `.env` on the server and is never sent to the
+renderer. OAuth tokens, the health cache, and each account record are encrypted
+at rest — with AES-256-GCM under `<data-dir>/master.key` on the server, and with
+`safeStorage` (Keychain, Credential Manager, or a Linux secret store) under
+Electron. Keep `.env` at mode `0600`; it is git-ignored.
 
-A Client Secret distributed in a desktop binary is not a durable global secret. The current setup is appropriate for personal use and development. A public release should move the OAuth code exchange to a small backend and complete Google's verification and security-review requirements.
+A Client Secret distributed in a desktop binary is not a durable global secret. The current setup is appropriate for personal use and development. A public release should complete Google's verification and security-review requirements.
 
 ### Troubleshooting
 
 `redirect_uri_mismatch`
 
-- Register `http://127.0.0.1:42813/oauth/callback` exactly. Do not use `localhost`, omit the path, or add a trailing slash.
+- Register `<origin>/auth/callback` for the exact origin you opened OpenFit at. Do not swap `localhost` for `127.0.0.1`, omit the path, or add a trailing slash.
+- Starting at a tailnet IP while only the loopback callback is registered produces this too.
+
+`OPENFIT_GOOGLE_CLIENT_ID is not set`
+
+- The server has no `.env` and no service environment. It exits 1 before creating a data directory. Under `npm run dev` this also kills Vite and Electron.
+
+`Sign-in took too long. Start again.`
+
+- More than ten minutes passed on the Google screens, or the browser began at one origin and Google returned to another.
 
 `Access blocked`, `access_denied`, or unauthorized user
 
@@ -174,7 +219,7 @@ A Client Secret distributed in a desktop binary is not a durable global secret. 
 
 `invalid_client`
 
-- Copy the Client ID and Client Secret again from the same OAuth client.
+- Copy the Client ID and Client Secret again from the same OAuth client into `.env`, then restart the server.
 - Remove accidental leading or trailing spaces.
 - Do not mix credentials from different Cloud projects.
 
@@ -182,9 +227,9 @@ HTTP 403 or API not enabled
 
 - Confirm that Google Health API is enabled in the same project as the OAuth client.
 
-Port `42813` is already in use
+Health disconnected after about a week
 
-- Close other OpenFit processes and retry. Only one OAuth flow can use the callback port at a time.
+- Google expires refresh tokens for apps in testing after 7 days. You are still signed in; click **Reconnect** to grant health access again, which forces a fresh consent screen.
 
 Some metrics are missing
 
@@ -197,35 +242,41 @@ For a longer checklist, see [Google Health setup](docs/GOOGLE_HEALTH_SETUP.md).
 ## Project structure
 
 ```text
+.env                          OAuth client for sign-in; required, git-ignored
 core/                         Transport-agnostic backend (no Electron, no HTTP)
-  app.cjs                     Composition root: builds everything from a data directory
+  app.cjs                     One account's capabilities, built from its data directory
+  accounts.cjs                Google subject -> encrypted per-account directory
+  account-registry.cjs        One cached app instance per signed-in account
+  identity.cjs                Google ID token claim validation
   secrets.cjs                 safeStorage or AES-256-GCM envelope storage
-  credentials.cjs             Config and token storage, validation, public status
-  oauth.cjs                   PKCE flow, loopback listener, callback handling
+  credentials.cjs             Token storage and public status
   sync.cjs                    Provider sync with the minimum-useful-response gate
   health-cache.cjs            Encrypted per-day archive
   providers/                  Google Health v4 and legacy Fitbit adapters
   agents/                     Assistant backends behind one interface
 server/
-  bin.cjs                     CLI entry, address discovery, startup banner
-  index.cjs                   HTTP wiring and the token gate
-  auth.cjs                    Token issue, cookie, constant-time check
+  bin.cjs                     CLI entry, composition root, address discovery, banner
+  env.cjs                     Reads the OAuth client from .env and the environment
+  index.cjs                   HTTP wiring, session/bearer gate, account resolution
+  auth.cjs                    Bearer token and account resolution rules
+  session.cjs                 Signed session cookies keyed off master.key
+  login-page.cjs              Server-rendered sign-in page for anonymous visitors
   static.cjs                  dist/ serving with security headers
-  routes/                     health, assistant, events (SSE), oauth
+  routes/                     health, assistant, events (SSE), login
 electron/
-  main.cjs                    Desktop shell: starts the core server on loopback
+  main.cjs                    Desktop shell — not updated for sign-in; does not start
 src/
   components/                 Views, charts, and assistant-ui chat
   data/                       Demo data and provider-independent normalization
   lib/api.ts                  fetch + SSE client, the renderer's only data path
-  App.tsx                     UI and connection-state orchestration
+  App.tsx                     UI, connection state, sign-out
   types.ts                    Shared renderer/backend contracts
 scripts/
   capture-ui.cjs              Electron visual smoke test
   check-node-syntax.cjs       Syntax-checks every shipped CommonJS file
 docs/
   ARCHITECTURE.md             System decisions and boundaries
-  SELF_HOSTING.md             Running the server, Tailscale, systemd
+  SELF_HOSTING.md             Running the server, sign-in, Tailscale, systemd
   AGENTS.md                   Assistant backend interface and how to add one
   DATA_COVERAGE.md            Data coverage and limitations
   GOOGLE_HEALTH_SETUP.md      Extended OAuth setup guide

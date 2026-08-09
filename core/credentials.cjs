@@ -2,7 +2,13 @@
 
 const { DEFAULT_PROVIDER, providerId } = require('./providers/index.cjs')
 
-const DEFAULT_REDIRECT_URI = 'http://127.0.0.1:42813/oauth/callback'
+// Only ever a placeholder for a host that supplied no identity of its own. The
+// real value is computed by the host from its public origin and always passed in
+// as `defaults.redirectUri`; see server/bin.cjs. The old loopback callback on
+// port 42813 was retired with the in-app OAuth flow — OpenFit no longer opens a
+// listener of its own, and `/auth/callback` is the only path Google is asked to
+// redirect to.
+const DEFAULT_REDIRECT_URI = 'http://127.0.0.1:7788/auth/callback'
 const OAUTH_IDENTITY_KEYS = ['provider', 'clientId', 'clientSecret', 'redirectUri']
 
 function emptyCredentials(defaults = {}) {

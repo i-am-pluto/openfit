@@ -93,7 +93,8 @@ subprocess's stdout. The interface itself is unchanged.
 Unit tests use a fake child process. To check a real backend end to end:
 
 ```bash
-npm run serve
+npm run serve   # requires .env; see docs/SELF_HOSTING.md
+TOKEN="$(cat ~/.local/share/openfit/server-token)"
 curl -s -H "Authorization: Bearer $TOKEN" localhost:7788/api/assistant/agents
 curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -X POST localhost:7788/api/assistant/turn \
@@ -102,3 +103,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
 
 Replies stream over `GET /api/events` as `assistant` events, not in the POST
 response.
+
+The bearer token reaches `/api/*` only and names no account. If more than one
+Google account has signed in to the instance, add
+`-H 'X-OpenFit-Account: you@example.com'` or the request is refused with `409`.

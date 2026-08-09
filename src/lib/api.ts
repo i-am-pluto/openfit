@@ -2,12 +2,12 @@ import type {
   AgentSummary,
   FitbitAuthStatus,
   FitbitBridge,
-  FitbitConfigInput,
   HealthAssistantBridge,
   HealthAssistantEvent,
   HealthAssistantStatus,
   RawFitbitPayload,
   RawHealthArchive,
+  SessionBridge,
 } from '@/types'
 
 /**
@@ -32,7 +32,7 @@ async function request<T>(path: string, method: Method = 'GET', body?: unknown):
   if (!response.ok) {
     const message = (payload as { error?: string } | null)?.error
       ?? (response.status === 401
-        ? 'This OpenFit session is not authorized. Reopen the link printed when the server started.'
+        ? 'This OpenFit session has ended. Reload the page and sign in with Google again.'
         : `Request failed (${response.status}).`)
     throw new Error(message)
   }
@@ -105,20 +105,35 @@ async function downloadArchive(): Promise<{ canceled: boolean; path?: string }> 
   return { canceled: false, path: filename }
 }
 
+/**
+ * Sends the browser to a path this server asked it to open.
+ *
+ * Sign-in is a top-level redirect to Google, so `fetch` is the wrong tool: it
+ * would follow the 302 and load the consent screen as an XHR that the CSP then
+ * blocks. The server returns the path and the browser navigates.
+ *
+ * Only a same-origin absolute path is accepted. `//host` is a protocol-relative
+ * URL and `https://host` an absolute one; navigating to either because a
+ * response said so would turn this into an open redirect, and a value that is
+ * not a string at all would navigate to the text "undefined".
+ */
+function navigateTo(target: unknown): { ok: boolean; message?: string } {
+  if (typeof target !== 'string' || !target.startsWith('/') || target.startsWith('//')) {
+    return { ok: false, message: 'This OpenFit server did not return a usable sign-in URL. Update the server and try again.' }
+  }
+  window.location.assign(target)
+  return { ok: true }
+}
+
 export const fitbit: FitbitBridge = {
   getStatus: () => request<FitbitAuthStatus>('/api/status'),
-  saveConfig: (config: FitbitConfigInput) => request<FitbitAuthStatus>('/api/config', 'POST', config),
 
+  // Health access and sign-in are one Google consent, so "reconnect" is
+  // "sign in again with the consent screen forced". The server decides the
+  // path; this only checks that what came back is one.
   async connect() {
-    const result = await request<{ ok: boolean; authorizationUrl?: string; requiresHost?: boolean }>('/api/connect', 'POST', {})
-    if (result.requiresHost) {
-      return {
-        ok: false,
-        message: 'Connect your health account from a browser on the machine running OpenFit. Google only accepts a loopback or https callback, so a tailnet address cannot receive it.',
-      }
-    }
-    if (result.authorizationUrl) window.open(result.authorizationUrl, '_blank', 'noopener,noreferrer')
-    return { ok: Boolean(result.ok) }
+    const result = await request<{ reauthorizeUrl?: unknown }>('/api/connect', 'POST', {})
+    return navigateTo(result?.reauthorizeUrl)
   },
 
   disconnect: () => request<FitbitAuthStatus>('/api/disconnect', 'POST', {}),
@@ -128,6 +143,23 @@ export const fitbit: FitbitBridge = {
   exportData: downloadArchive,
   onAuthComplete: (callback) => subscribe('auth-complete', callback),
   onSyncProgress: (callback) => subscribe('sync-progress', callback),
+}
+
+/**
+ * The OpenFit session, which is not a health-provider concern.
+ *
+ * `everywhere` is the only revocation mechanism there is: it bumps the account's
+ * epoch server-side, which invalidates every session cookie ever issued for that
+ * account, including the ones on devices this browser cannot reach. The server
+ * reports whether that actually happened, and the caller must not claim it did
+ * when it did not.
+ */
+export const session: SessionBridge = {
+  signOut: async (everywhere: boolean) => {
+    const result = await request<{ ok?: unknown; revoked?: unknown }>('/auth/logout', 'POST', { everywhere: everywhere === true })
+    return { ok: result?.ok === true, revoked: result?.revoked === true }
+  },
+  goToLoginPage: () => navigateTo('/'),
 }
 
 export const healthAssistant: HealthAssistantBridge = {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ChevronsUpDown, LoaderCircle, RefreshCw, Sparkles } from 'lucide-react'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
@@ -6,12 +6,9 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import {
   Sidebar,
   SidebarContent,
@@ -30,9 +27,9 @@ import {
   useSidebar,
 } from '@/components/ui/sidebar'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import type { DashboardData, FitbitAuthStatus, FitbitConfigInput, HealthProvider, PageId } from '@/types'
+import type { DashboardData, FitbitAuthStatus, PageId } from '@/types'
 import { createDemoData, localIso } from '@/data/demo'
-import { fitbit } from '@/lib/api'
+import { fitbit, session } from '@/lib/api'
 import { normalizeFitbitData } from '@/data/normalize'
 import { formatDate, relativeTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -52,7 +49,6 @@ import {
   DeviceIcon,
   DisconnectIcon,
   ExportIcon,
-  ExternalIcon,
   HeartIcon,
   LoaderIcon,
   SettingsIcon,
@@ -78,13 +74,16 @@ const defaultStatus: FitbitAuthStatus = {
   hasBackend: false,
   configured: false,
   connected: false,
-  clientId: '',
-  redirectUri: 'http://127.0.0.1:42813/oauth/callback',
-  hasClientSecret: false,
   storageEncrypted: false,
   lastSyncAt: null,
   provider: 'google-health',
 }
+
+// Google issues a refresh token that expires after seven days while the OAuth
+// consent screen is still in testing, so a signed-in account whose health access
+// has lapsed is the ordinary case. It is explained rather than reported as a
+// fault, and the way out is a fresh consent — the same Google sign-in.
+const RECONNECT_EXPLANATION = 'Google expires health access after about a week while the OAuth consent screen is in testing. Reconnect to grant it again; you stay signed in either way.'
 
 interface ToastState {
   tone: 'success' | 'error' | 'neutral'
@@ -122,6 +121,7 @@ export default function App() {
   const [syncing, setSyncing] = useState(false)
   const [syncTargetDate, setSyncTargetDate] = useState<string | null>(null)
   const [connecting, setConnecting] = useState(false)
+  const [signingOut, setSigningOut] = useState(false)
   const [syncProgress, setSyncProgress] = useState<SyncProgressState | null>(null)
   const [toast, setToast] = useState<ToastState | null>(null)
   const selectedDateRef = useRef(selectedDate)
@@ -270,51 +270,74 @@ export default function App() {
     if (status.connected) void runSync(date)
   }
 
+  // Reconnecting is a full-page redirect to Google, so a success here means the
+  // browser is on its way out of this document and `connecting` never has to be
+  // cleared again. There is nothing to configure first: the OAuth client comes
+  // from the server's environment.
   const connect = async () => {
     if (!status.configured) {
-      setSettingsOpen(true)
+      setToast({
+        tone: 'error',
+        message: 'This OpenFit server has no Google OAuth client. Set OPENFIT_GOOGLE_CLIENT_ID and OPENFIT_GOOGLE_CLIENT_SECRET in its .env file and restart it.',
+      })
       return
     }
     setConnecting(true)
     try {
       const result = await fitbit.connect()
-      if (!result.ok) throw new Error(result.message ?? 'Unable to start OAuth.')
-      setToast({ tone: 'neutral', message: 'Complete authorization in your browser.' })
+      if (!result.ok) throw new Error(result.message ?? 'Unable to start Google authorization.')
+      setToast({ tone: 'neutral', message: 'Opening the Google consent screen…' })
     } catch (error) {
       setConnecting(false)
       setToast({ tone: 'error', message: error instanceof Error ? error.message : 'Connection failed.' })
     }
   }
 
-  const saveAndConnect = async (config: FitbitConfigInput) => {
+  const signOut = async (everywhere: boolean) => {
+    setSigningOut(true)
     try {
-      const nextStatus = await fitbit.saveConfig(config)
-      setStatus(nextStatus)
-      setConnecting(true)
-      const result = await fitbit.connect()
-      if (!result.ok) throw new Error(result.message ?? 'Unable to start OAuth.')
-      setToast({ tone: 'neutral', message: 'Authorize OpenFit in the browser window.' })
+      const result = await session.signOut(everywhere)
+      // The server has already cleared this browser's cookie by now, so the
+      // page cannot stay usable either way. It is still not allowed to claim
+      // the other devices were signed out when the epoch was not bumped — that
+      // is the whole point of the control, and someone who lost a device would
+      // walk away believing it had been locked out.
+      if (everywhere && !result.revoked) {
+        throw new Error('Signed out here, but no other devices could be signed out — this server found no session to revoke. Sign in again and retry.')
+      }
+      session.goToLoginPage()
     } catch (error) {
-      setConnecting(false)
-      setToast({ tone: 'error', message: error instanceof Error ? error.message : 'Invalid configuration.' })
+      setSigningOut(false)
+      setToast({ tone: 'error', message: error instanceof Error ? error.message : 'Signing out failed.' })
     }
   }
 
+  // Both of these refuse while a sync is in flight, and the export refuses when
+  // there is nothing real to write. Left unhandled the rejection would go to the
+  // console and the button would look like it did nothing at all.
   const disconnect = async () => {
-    setStatus(await fitbit.disconnect())
-    setData(createDemoData(selectedDate))
-    setSettingsOpen(false)
-    setPage('today')
-    setToast({ tone: 'success', message: 'Account disconnected and local data removed.' })
+    try {
+      setStatus(await fitbit.disconnect())
+      setData(createDemoData(selectedDate))
+      setSettingsOpen(false)
+      setPage('today')
+      setToast({ tone: 'success', message: 'Account disconnected and local data removed.' })
+    } catch (error) {
+      setToast({ tone: 'error', message: error instanceof Error ? error.message : 'Disconnecting failed.' })
+    }
   }
 
   const exportData = async () => {
     if (data.source === 'demo') {
-      setToast({ tone: 'neutral', message: 'Connect Google Health to export real data.' })
+      setToast({ tone: 'neutral', message: 'Reconnect Google Health to export real data.' })
       return
     }
-    const result = await fitbit.exportData()
-    if (!result.canceled) setToast({ tone: 'success', message: 'JSON archive exported.' })
+    try {
+      const result = await fitbit.exportData()
+      if (!result.canceled) setToast({ tone: 'success', message: 'JSON archive exported.' })
+    } catch (error) {
+      setToast({ tone: 'error', message: error instanceof Error ? error.message : 'The export failed.' })
+    }
   }
 
   const currentView = useMemo(() => {
@@ -328,8 +351,9 @@ export default function App() {
   }, [data, page, status])
 
   const isToday = selectedDate === localIso()
+  const sourceProviderLabel = status.provider === 'fitbit-legacy' ? 'Fitbit legacy' : 'Google Health'
   const sourceLabel = status.connected
-    ? status.provider === 'fitbit-legacy' ? 'Fitbit legacy' : 'Google Health'
+    ? sourceProviderLabel
     : data.source === 'demo' ? 'Demo data' : 'Local cache'
   const pageMeta = navItems.find((item) => item.id === page) ?? navItems[0]
   const loadingSelectedDate = syncing && data.selectedDate !== selectedDate
@@ -429,8 +453,8 @@ export default function App() {
                 </IconButton>
               </>
             ) : (
-              <Button className="connect-button" aria-label={`Connect ${status.provider === 'fitbit-legacy' ? 'Fitbit legacy' : 'Google Health'}`} onClick={connect} disabled={connecting}>
-                {connecting ? <LoaderIcon className="spin" /> : <CloudIcon />}<span>Connect</span>
+              <Button className="connect-button" aria-label={`Reconnect ${sourceProviderLabel}`} onClick={connect} disabled={connecting}>
+                {connecting ? <LoaderIcon className="spin" /> : <CloudIcon />}<span>Reconnect</span>
               </Button>
             )}
           </div>
@@ -476,15 +500,16 @@ export default function App() {
         onNavigate={navigateFromAssistant}
       />
 
-      <SettingsDialog
+      <AccountDialog
         open={settingsOpen}
         status={status}
         connecting={connecting}
+        signingOut={signingOut}
         onOpenChange={setSettingsOpen}
-        onSave={saveAndConnect}
         onConnect={connect}
         onExport={exportData}
         onDisconnect={disconnect}
+        onSignOut={signOut}
       />
 
       {toast && (
@@ -627,124 +652,74 @@ function OpenFitSidebar({
   )
 }
 
-function SettingsDialog({
+function AccountDialog({
   open,
   status,
   connecting,
+  signingOut,
   onOpenChange,
-  onSave,
   onConnect,
   onExport,
   onDisconnect,
+  onSignOut,
 }: {
   open: boolean
   status: FitbitAuthStatus
   connecting: boolean
+  signingOut: boolean
   onOpenChange: (open: boolean) => void
-  onSave: (config: FitbitConfigInput) => Promise<void>
   onConnect: () => Promise<void>
   onExport: () => Promise<void>
   onDisconnect: () => Promise<void>
+  onSignOut: (everywhere: boolean) => Promise<void>
 }) {
-  const [clientId, setClientId] = useState(status.clientId)
-  const [clientSecret, setClientSecret] = useState('')
-  const [redirectUri, setRedirectUri] = useState(status.redirectUri)
-  const [provider, setProvider] = useState<HealthProvider>(status.provider)
-  const [editing, setEditing] = useState(!status.configured)
-
-  useEffect(() => {
-    if (!open) return
-    setClientId(status.clientId)
-    setRedirectUri(status.redirectUri)
-    setProvider(status.provider)
-    setClientSecret('')
-    setEditing(!status.configured)
-  }, [open, status])
-
-  const secretRequired = provider === 'google-health'
-  const providerLabel = provider === 'google-health' ? 'Google Health' : 'Fitbit legacy'
-  const savedSecretMatchesProvider = status.hasClientSecret && status.provider === provider
-  const canSave = status.storageEncrypted
-    && clientId.trim().length > 2
-    && (!secretRequired || clientSecret.trim().length > 4 || savedSecretMatchesProvider)
-    && redirectUri.startsWith('http://127.0.0.1:')
-
-  const submit = (event: FormEvent) => {
-    event.preventDefault()
-    if (!canSave) return
-    void onSave({
-      provider,
-      clientId: clientId.trim(),
-      clientSecret: clientSecret.trim() || undefined,
-      redirectUri: redirectUri.trim(),
-    })
-  }
-
-  const openDeveloperPortal = () => {
-    const url = provider === 'google-health'
-      ? 'https://console.cloud.google.com/apis/library/health.googleapis.com'
-      : 'https://dev.fitbit.com/apps/new'
-    window.open(url, '_blank', 'noopener,noreferrer')
-  }
+  const providerLabel = status.provider === 'fitbit-legacy' ? 'Fitbit legacy' : 'Google Health'
+  const busy = connecting || signingOut
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="settings-dialog" showCloseButton>
         <DialogHeader>
           <div className="dialog-icon"><CloudIcon /></div>
-          <DialogTitle>{status.connected && !editing ? `${providerLabel} connected` : `Connect ${providerLabel}`}</DialogTitle>
-          <DialogDescription>Your credentials and data remain encrypted on this computer.</DialogDescription>
+          <DialogTitle>{status.connected ? `${providerLabel} connected` : `${providerLabel} disconnected`}</DialogTitle>
+          <DialogDescription>
+            You are signed in to this OpenFit server with Google. Health data and tokens stay encrypted on the machine that runs it.
+          </DialogDescription>
         </DialogHeader>
 
-        {status.connected && !editing ? (
-          <div className="connected-state">
-            <div className="connection-check"><CheckIcon /></div>
-            <div><h3>Sync active</h3><p>Last updated {relativeTime(status.lastSyncAt)}.</p></div>
-            <div className="connected-actions">
-              <Button onClick={onConnect} disabled={connecting}>{connecting ? <LoaderCircle className="spin" /> : <RefreshCw />} Reauthorize</Button>
-              <Button variant="outline" onClick={() => setEditing(true)}><SettingsIcon /> Edit configuration</Button>
-              <Button variant="outline" onClick={() => void onExport()}><ExportIcon /> Export data</Button>
-              <Button variant="destructive" onClick={() => void onDisconnect()}><DisconnectIcon /> Disconnect and delete local data</Button>
-            </div>
+        <div className="connected-state">
+          <div className={cn('connection-check', !status.connected && 'is-warning')}>
+            {status.connected ? <CheckIcon /> : <CloudIcon />}
           </div>
-        ) : (
-          <form onSubmit={submit} className="settings-form">
-            <div className="provider-picker" role="radiogroup" aria-label="Health provider">
-              <label className={cn(provider === 'google-health' && 'active')}>
-                <input className="sr-only" type="radio" name="health-provider" value="google-health" checked={provider === 'google-health'} onChange={() => setProvider('google-health')} />
-                <CloudIcon /><span><strong>Google Health</strong><small>API v4 · recommended</small></span>{provider === 'google-health' && <CheckIcon />}
-              </label>
-              <label className={cn(provider === 'fitbit-legacy' && 'active')}>
-                <input className="sr-only" type="radio" name="health-provider" value="fitbit-legacy" checked={provider === 'fitbit-legacy'} onChange={() => setProvider('fitbit-legacy')} />
-                <DeviceIcon /><span><strong>Fitbit legacy</strong><small>Temporary compatibility</small></span>{provider === 'fitbit-legacy' && <CheckIcon />}
-              </label>
-            </div>
+          <div>
+            <h3>{status.connected ? 'Sync active' : 'Health access expired'}</h3>
+            <p>{status.connected ? `Last updated ${relativeTime(status.lastSyncAt)}.` : RECONNECT_EXPLANATION}</p>
+          </div>
 
-            <div className="form-field">
-              <Label htmlFor="client-id">OAuth Client ID</Label>
-              <Input id="client-id" value={clientId} onChange={(event) => setClientId(event.target.value)} autoComplete="off" />
-            </div>
-            {secretRequired && (
-              <div className="form-field">
-                <Label htmlFor="client-secret">Client Secret {savedSecretMatchesProvider && <span>· leave blank to keep the current one</span>}</Label>
-                <Input id="client-secret" type="password" value={clientSecret} onChange={(event) => setClientSecret(event.target.value)} placeholder={savedSecretMatchesProvider ? '••••••••••••' : ''} autoComplete="new-password" />
-              </div>
-            )}
-            <div className="form-field">
-              <Label htmlFor="callback-url">Callback URL</Label>
-              <Input id="callback-url" value={redirectUri} onChange={(event) => setRedirectUri(event.target.value)} spellCheck={false} />
-              <p>It must exactly match the URL configured in Google Cloud.</p>
-            </div>
+          <div className="scope-note">
+            <ShieldIcon />
+            <p>One Google consent covers signing in and read-only access to activity, heart, sleep, and authorized measurements. OpenFit never asks for a Client ID or Client Secret — the server operator sets those in its environment.</p>
+          </div>
 
-            <button type="button" className="portal-link" onClick={openDeveloperPortal}>Open developer console <ExternalIcon /></button>
-            <div className="scope-note"><ShieldIcon /><p>Read-only permissions for activity, heart, sleep, and authorized measurements.</p></div>
-
-            <DialogFooter className="settings-footer">
-              <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-              <Button type="submit" disabled={!canSave || connecting}>{connecting ? <LoaderIcon className="spin" /> : <CloudIcon />} Save and connect</Button>
-            </DialogFooter>
-          </form>
-        )}
+          <div className="connected-actions">
+            <Button onClick={() => void onConnect()} disabled={busy}>
+              {connecting ? <LoaderCircle className="spin" /> : <RefreshCw />}
+              {status.connected ? 'Reauthorize health access' : `Reconnect ${providerLabel}`}
+            </Button>
+            {/* The archive is local, so it stays exportable while health access is lapsed. */}
+            <Button variant="outline" onClick={() => void onExport()} disabled={busy}><ExportIcon /> Export data</Button>
+            <Button variant="outline" onClick={() => void onSignOut(false)} disabled={busy}>
+              {signingOut ? <LoaderCircle className="spin" /> : <DisconnectIcon />} Sign out of this browser
+            </Button>
+            {/* The only way to end a session on a device you no longer hold. */}
+            <Button variant="outline" onClick={() => void onSignOut(true)} disabled={busy}>
+              <ShieldIcon /> Sign out everywhere
+            </Button>
+            <Button variant="destructive" onClick={() => void onDisconnect()} disabled={busy}>
+              <CloseIcon /> Disconnect and delete local data
+            </Button>
+          </div>
+        </div>
       </DialogContent>
     </Dialog>
   )

@@ -1,5 +1,11 @@
 # Desktop Release
 
+> **Blocked on this branch.** `electron/main.cjs` has not been recomposed for
+> Google sign-in: it calls `createServer` without a session store, an accounts
+> store, or an account registry, which `createServer` refuses. `npm run dist`
+> still produces artifacts, but the packaged app fails at startup. Nothing below
+> is worth doing until the Electron composition root is fixed.
+
 ## Local Package Status
 
 `npm run dist` produces macOS DMG and ZIP artifacts that are ready for local testing. If a **Developer ID Application** identity is not installed, electron-builder intentionally creates an unsigned artifact. That is suitable for development and personal use, not public distribution.

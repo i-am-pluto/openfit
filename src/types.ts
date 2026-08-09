@@ -208,31 +208,32 @@ export interface RawHealthArchive {
   days: Record<string, RawFitbitPayload>
 }
 
+/**
+ * `GET /api/status`.
+ *
+ * The OAuth client is not part of this any more. It comes from the server's
+ * environment (`OPENFIT_GOOGLE_CLIENT_ID`, `OPENFIT_GOOGLE_CLIENT_SECRET`), the
+ * renderer cannot set it, and there is no endpoint that would accept it.
+ *
+ * `connected: false` while signed in is the normal steady state, not an error:
+ * Google expires a refresh token after seven days while the consent screen is
+ * in testing. `reauthorizeUrl` is how a browser gets out of it.
+ */
 export interface FitbitAuthStatus {
   hasBackend: boolean
   configured: boolean
   connected: boolean
-  clientId: string
-  redirectUri: string
-  hasClientSecret: boolean
   storageEncrypted: boolean
   storageBackend?: string
   lastSyncAt: string | null
   provider: HealthProvider
   publicOrigin?: string | null
+  reauthorizeUrl?: string
   assistant?: HealthAssistantStatus
-}
-
-export interface FitbitConfigInput {
-  provider: HealthProvider
-  clientId: string
-  clientSecret?: string
-  redirectUri: string
 }
 
 export interface FitbitBridge {
   getStatus: () => Promise<FitbitAuthStatus>
-  saveConfig: (config: FitbitConfigInput) => Promise<FitbitAuthStatus>
   connect: () => Promise<{ ok: boolean; message?: string }>
   disconnect: () => Promise<FitbitAuthStatus>
   sync: (date: string) => Promise<RawFitbitPayload>
@@ -241,6 +242,13 @@ export interface FitbitBridge {
   exportData: () => Promise<{ canceled: boolean; path?: string }>
   onAuthComplete: (callback: (result: { ok: boolean; error?: string }) => void) => () => void
   onSyncProgress: (callback: (progress: { completed: number; total: number; key: string; date?: string }) => void) => () => void
+}
+
+export interface SessionBridge {
+  // `revoked` is true only when the account's epoch was actually bumped, which
+  // is what ends sessions on other devices.
+  signOut: (everywhere: boolean) => Promise<{ ok: boolean; revoked: boolean }>
+  goToLoginPage: () => void
 }
 
 export interface HealthAssistantStatus {
