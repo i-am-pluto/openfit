@@ -425,6 +425,19 @@ describe('session and bearer guards', () => {
     expect(registry.forAccount).not.toHaveBeenCalled()
   })
 
+  it('refuses a header that names nothing even when there is only one account', async () => {
+    // The sole-account shortcut must sit *below* the header check. Above it, a
+    // caller explicitly asking for b@example.com on an instance holding only
+    // a@example.com is silently handed a@example.com.
+    const { base, registry } = await withServer(stubApp(), { accountCount: 1 })
+    const response = await fetch(`${base}/api/status`, {
+      headers: { authorization: 'Bearer test-token', 'x-openfit-account': 'nobody@example.com' },
+    })
+
+    expect(response.status).toBe(409)
+    expect(registry.forAccount).not.toHaveBeenCalled()
+  })
+
   it('refuses an X-OpenFit-Account header that names two accounts at once', async () => {
     const { base, registry } = await withServer(stubApp(), { emails: ['same@example.com', 'same@example.com'] })
     const response = await fetch(`${base}/api/status`, {
