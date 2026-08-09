@@ -4,16 +4,10 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 
-const { createAccountRegistry } = require('../core/account-registry.cjs')
-const { createAccounts } = require('../core/accounts.cjs')
 const { createAgentRegistry } = require('../core/agents/index.cjs')
-const { createApp, normalizePublicOrigin } = require('../core/app.cjs')
-const { validateIdToken } = require('../core/identity.cjs')
-const { buildGoogleAuthUrl, exchangeGoogleCode } = require('../core/providers/google-health.cjs')
-const { createSecretStore } = require('../core/secrets.cjs')
+const { normalizePublicOrigin } = require('../core/app.cjs')
+const { composeBackend } = require('./compose.cjs')
 const { loadEnv } = require('./env.cjs')
-const { createServer } = require('./index.cjs')
-const { createSessions } = require('./session.cjs')
 
 // Absolute, not cwd-relative: a service unit with its own WorkingDirectory would
 // otherwise find no .env, fall back to whatever the environment happens to hold,
@@ -114,22 +108,14 @@ function main(argv = process.argv.slice(2), env = process.env) {
   // Configuration is settled before anything is created on disk, so a server
   // that cannot sign anyone in leaves no data directory and no master key behind.
   let publicOrigin = null
-  let identity = null
+  let configured = null
   try {
-    const configured = loadEnv({ env, path: ENV_FILE })
+    configured = loadEnv({ env, path: ENV_FILE })
     // Validated here rather than at the first request: createApp would otherwise
     // reject a non-https origin from inside a request handler, long after the
     // operator stopped watching, and `secure` cookies would already be set on a
     // plain-http origin where no browser will send them back.
     publicOrigin = normalizePublicOrigin(configured.publicOrigin)
-    // Frozen because one object is both the login routes' identity and the
-    // per-account app's oauthDefaults: the client that signs a person in and the
-    // client that refreshes their token must not be able to drift apart.
-    identity = Object.freeze({
-      clientId: configured.clientId,
-      clientSecret: configured.clientSecret,
-      redirectUri: `${publicOrigin || `http://127.0.0.1:${port}`}/auth/callback`,
-    })
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error))
     process.exit(1)
@@ -142,63 +128,23 @@ function main(argv = process.argv.slice(2), env = process.env) {
     process.exit(1)
   }
 
-  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 })
-
-  // One secret store for the instance. The accounts index and every account's
-  // app read it, so `master.key` stays instance-wide instead of one key per
-  // account directory, and the session signing key is derived from those bytes.
-  const secrets = createSecretStore({ dir: dataDir })
-  const accounts = createAccounts({ dataDir, secrets })
-  const registry = createAccountRegistry({
-    dataDir,
-    secrets,
-    createApp,
-    appOptions: {
-      env,
-      clientVersion: require('../package.json').version,
-      publicOrigin,
-      // Without this the OAuth client falls back to whatever a previous release
-      // wrote into the account's credentials file, and .env is ignored in
-      // silence: the sign-in works and the first token refresh does not.
-      oauthDefaults: identity,
-    },
-  })
-
-  // `Secure` has one source. The login routes check this against the session
-  // store at wiring time, so the two cookies cannot disagree.
-  const secure = Boolean(publicOrigin)
-  const sessions = createSessions({ masterKey: secrets.masterKey(), secure })
-
   const tokenOverride = env.OPENFIT_SERVER_TOKEN
     || (args['token-file'] ? fs.readFileSync(args['token-file'], 'utf8').trim() : null)
 
-  const { server } = createServer({
-    staticRoot,
+  // Everything below the configuration check is shared with the desktop host.
+  // server/compose.cjs creates the data directory, the instance secret store,
+  // the accounts index, the per-account registry, the session store and the
+  // HTTP server, and it is the only place any of that is wired.
+  const { server, secrets, registry, accounts, sessions } = composeBackend({
     dataDir,
+    staticRoot,
+    env,
+    clientVersion: require('../package.json').version,
+    clientId: configured.clientId,
+    clientSecret: configured.clientSecret,
+    publicOrigin,
+    localOrigin: `http://127.0.0.1:${port}`,
     token: tokenOverride,
-    sessions,
-    accounts,
-    registry,
-    loginDeps: {
-      sessions,
-      accounts,
-      identity,
-      secure,
-      validateIdToken,
-      authorizationUrl: ({ state, nonce, challenge, prompt }) => buildGoogleAuthUrl({
-        clientId: identity.clientId,
-        redirectUri: identity.redirectUri,
-        state,
-        nonce,
-        challenge,
-        prompt,
-      }),
-      exchange: (code, verifier) => exchangeGoogleCode({ ...identity, code, verifier }),
-      // The app for the account that just signed in, created on demand. This is
-      // request handling — the callback is a request — so the registry latch is
-      // still open.
-      onAuthorized: (account, tokens) => registry.forAccount(account).adoptToken(tokens),
-    },
   })
 
   server.on('error', (error) => {
@@ -228,8 +174,9 @@ function main(argv = process.argv.slice(2), env = process.env) {
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
 
-  // The composed pieces, not just the socket: this is the only place they are
-  // wired together, so it is the only place a test can check that they were.
+  // The composed pieces, not just the socket: a test that only had the server
+  // could not tell that the registry, the accounts index and the session store
+  // are the same ones the login routes were handed.
   return { server, registry, accounts, sessions }
 }
 
