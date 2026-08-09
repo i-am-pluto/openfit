@@ -3242,3 +3242,49 @@ input:focus-visible,
   .chart-key li { font-size: 11px; }
   .heatmap-cell-value { font-size: 10px; }
 }
+
+/* Profile capture inside the settings dialog. Every field is optional, so the
+   unlock line under each input is the part that has to be readable. */
+.profile-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-graphite);
+}
+
+.profile-settings-header { display: grid; grid-template-columns: 18px 1fr; gap: 10px; align-items: start; }
+.profile-settings-header > svg { width: 16px; height: 16px; margin-top: 2px; color: var(--color-fog); }
+.profile-settings-header h3 { margin: 0 0 3px; color: var(--color-mist); font-size: 13px; font-weight: 590; }
+.profile-settings-header p { margin: 0; color: var(--color-fog); font-size: 13px; line-height: 1.5; }
+
+.profile-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; }
+
+.profile-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.profile-field-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 18px; }
+.profile-field-head [data-slot="label"] { color: var(--color-mist); font-size: 13px; }
+.profile-field-unit { color: var(--color-slate); font-size: 12px; font-weight: 400; }
+
+/* Provenance, not decoration: a value the store holds but has not recorded as
+   user-edited was prefilled by the provider and a sync may replace it. */
+.profile-field-origin {
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--color-graphite);
+  border-radius: 999px;
+  color: var(--color-slate);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.profile-field-origin.is-user { color: var(--color-mist); border-color: var(--color-mist); }
+.profile-field-saving { width: 13px; height: 13px; color: var(--color-fog); }
+
+.profile-field small { color: var(--color-slate); font-size: 12px; line-height: 1.4; }
+.profile-field-error { margin: 0; color: var(--color-crimson); font-size: 12px; line-height: 1.4; }
+.profile-completeness { margin: 0; color: var(--color-slate); font-size: 12px; }
+
+@media (max-width: 720px) {
+  .profile-fields { grid-template-columns: minmax(0, 1fr); }
+}

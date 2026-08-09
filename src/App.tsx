@@ -35,6 +35,7 @@ import { formatDate, relativeTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { ActivityView, BodyView, DevicesView, HealthView, SleepView, TodayView } from '@/components/Views'
 import { HealthAssistant } from '@/components/HealthAssistant'
+import { ProfileSettings } from '@/components/ProfileSettings'
 import type { AssistantNavigation } from '@/lib/health-assistant'
 import type { AppIcon } from '@/components/icons'
 import {
@@ -720,6 +721,8 @@ function AccountDialog({
             </Button>
           </div>
         </div>
+
+        <ProfileSettings />
       </DialogContent>
     </Dialog>
   )

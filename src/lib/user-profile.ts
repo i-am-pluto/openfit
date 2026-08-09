@@ -105,7 +105,7 @@ export function resolveGoals(data: DashboardData, profile: UserProfile): Resolve
   }
 }
 
-const UNLOCKS: Array<{ field: keyof UserProfile; unlocks: string }> = [
+export const UNLOCKS: Array<{ field: keyof UserProfile; unlocks: string }> = [
   { field: 'birthYear', unlocks: 'Heart-rate zones and VO2 max context' },
   { field: 'heightCm', unlocks: 'BMI and its trend' },
   { field: 'measuredMaxHeartRate', unlocks: 'Heart-rate zones from a measurement instead of an estimate' },
