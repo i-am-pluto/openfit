@@ -1,4 +1,9 @@
-import type { DashboardData, PageId, TrendPoint } from '@/types'
+import type { ActivityItem, DashboardData, PageId, TrendPoint, UserProfile } from '@/types'
+import { dailyCardioLoad, workloadRatio, type LoadDay } from './cardio-load'
+import { buildInsights } from './insight-engine'
+import { correlate, detectAnomalies, weeklyRollup } from './metric-analysis'
+import { recoveryPanel } from './recovery-panel'
+import { EMPTY_USER_PROFILE, bmiFor, maxHeartRate, resolveGoals } from './user-profile'
 
 export interface AssistantNavigation {
   page?: PageId
@@ -138,10 +143,121 @@ function compactDay(data: DashboardData) {
   })
 }
 
+/** Three decimals everywhere: enough to compare, short enough to keep the payload small. */
+const round3 = (value: number) => Number(value.toFixed(3))
+
+/**
+ * The same pairs `correlationRule` in insight-engine.ts evaluates.
+ *
+ * The assistant must quote the r the screen shows. A different pair list here
+ * would let the chat cite a coefficient that appears nowhere in the UI.
+ */
+const CORRELATION_PAIRS: Array<{
+  pair: string
+  left: (point: TrendPoint) => number | null
+  right: (point: TrendPoint) => number | null
+}> = [
+  { pair: 'hrvMs~restingHeartRate', left: (point) => point.hrvMs, right: (point) => point.restingHeartRate },
+  { pair: 'sleepMinutes~sleepEfficiency', left: (point) => point.sleepMinutes, right: (point) => point.sleepEfficiency },
+  { pair: 'steps~sleepMinutes', left: (point) => point.steps, right: (point) => point.sleepMinutes },
+  { pair: 'activeMinutes~restingHeartRate', left: (point) => point.activeMinutes, right: (point) => point.restingHeartRate },
+]
+
+/** The same metrics `anomalyDayRule` scans. */
+const ANOMALY_METRICS: Array<{ metric: string; select: (point: TrendPoint) => number | null }> = [
+  { metric: 'steps', select: (point) => point.steps },
+  { metric: 'restingHeartRate', select: (point) => point.restingHeartRate },
+  { metric: 'hrvMs', select: (point) => point.hrvMs },
+  { metric: 'sleepMinutes', select: (point) => point.sleepMinutes },
+]
+
+function correlationsFor(trends: TrendPoint[]) {
+  return CORRELATION_PAIRS.map(({ pair, left, right }) => {
+    const result = correlate(trends.map(left), trends.map(right))
+    // Null below seven paired days. Dropped by `withoutNulls` rather than
+    // reported as an absent coefficient, because "no r" and "r near zero" are
+    // different findings and the assistant must not read one as the other.
+    return result ? { pair, r: round3(result.r), sampleCount: result.sampleCount } : null
+  })
+}
+
+function anomaliesFor(trends: TrendPoint[]) {
+  return ANOMALY_METRICS.flatMap(({ metric, select }) =>
+    detectAnomalies(trends.map(select)).map((anomaly) => ({
+      metric,
+      // `detectAnomalies` indexes the very array it was handed, so the row exists.
+      date: trends[anomaly.index].date,
+      value: round3(anomaly.value),
+      baseline: round3(anomaly.baseline),
+      sigma: round3(anomaly.sigma),
+      z: round3(anomaly.z),
+    })))
+}
+
+/**
+ * One `LoadDay` per date in the same window the context reports.
+ *
+ * The trend row supplies Active Zone Minutes for every visible day; an archived
+ * day, where one exists, supplies the per-workout heart zones `dailyCardioLoad`
+ * prefers. Same precedence as the archive itself, so the load series covers
+ * exactly the days the assistant can see.
+ */
+function loadDaysFor(current: DashboardData, archiveDays: DashboardData[]): LoadDay[] {
+  const byDate = new Map<string, LoadDay>()
+  const activitiesOn = (activities: ActivityItem[], date: string) =>
+    activities.filter((activity) => activity.date === date)
+
+  for (const point of current.trends) {
+    byDate.set(point.date, {
+      date: point.date,
+      activities: activitiesOn(current.activities, point.date),
+      zoneMinutes: point.zoneMinutes,
+    })
+  }
+  for (const day of [...archiveDays, current]) {
+    byDate.set(day.selectedDate, {
+      date: day.selectedDate,
+      activities: activitiesOn(day.activities, day.selectedDate),
+      zoneMinutes: day.activity.zoneMinutes,
+    })
+  }
+  return [...byDate.values()]
+}
+
+/**
+ * The computed analysis, so the assistant quotes the screen instead of
+ * re-deriving it. Two correlation values for the same pair, computed two ways,
+ * is the worst possible outcome for trust.
+ */
+function buildAnalysis(current: DashboardData, archiveDays: DashboardData[], profile: UserProfile) {
+  const loads = dailyCardioLoad(loadDaysFor(current, archiveDays))
+
+  return withoutNulls({
+    profile: {
+      maxHeartRate: maxHeartRate(profile, new Date(current.selectedDate).getUTCFullYear()),
+      bmi: bmiFor(current.body.weightKg, profile),
+      goals: resolveGoals(current, profile),
+    },
+    correlations: correlationsFor(current.trends),
+    anomalies: anomaliesFor(current.trends),
+    weekly: {
+      steps: weeklyRollup(current.trends, (point) => point.steps),
+      sleepMinutes: weeklyRollup(current.trends, (point) => point.sleepMinutes),
+    },
+    recovery: recoveryPanel(current),
+    cardioLoad: {
+      daily: loads.slice(-28),
+      workload: workloadRatio(loads, current.selectedDate),
+    },
+    insights: buildInsights(current, profile, { loads }),
+  })
+}
+
 export function buildHealthAssistantContext(
   current: DashboardData,
   archiveDays: DashboardData[],
   page: PageId,
+  profile: UserProfile = EMPTY_USER_PROFILE,
 ) {
   const days = new Map<string, unknown>()
 
@@ -198,6 +314,7 @@ export function buildHealthAssistantContext(
       daily: sortedDays,
     },
     selectedDayDetail: selectedDetail,
+    analysis: buildAnalysis(current, archiveDays, profile),
   }))
 }
 

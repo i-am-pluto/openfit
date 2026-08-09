@@ -21,6 +21,7 @@ import {
   visibleAssistantText,
   type AssistantNavigation,
 } from '@/lib/health-assistant'
+import { EMPTY_USER_PROFILE } from '@/lib/user-profile'
 import type {
   AgentSummary,
   DashboardData,
@@ -28,6 +29,7 @@ import type {
   HealthAssistantStatus,
   PageId,
   RawHealthArchive,
+  UserProfile,
 } from '@/types'
 
 const unavailableStatus: HealthAssistantStatus = {
@@ -87,23 +89,27 @@ export function HealthAssistant({
   open,
   data,
   page,
+  profile = EMPTY_USER_PROFILE,
   onOpenChange,
   onNavigate,
 }: {
   open: boolean
   data: DashboardData
   page: PageId
+  profile?: UserProfile
   onOpenChange: (open: boolean) => void
   onNavigate: (navigation: AssistantNavigation) => void
 }) {
   const dataRef = useRef(data)
   const pageRef = useRef(page)
+  const profileRef = useRef(profile)
   const navigateRef = useRef(onNavigate)
   const [status, setStatus] = useState(unavailableStatus)
   const [agents, setAgents] = useState<AgentSummary[]>([])
 
   useEffect(() => { dataRef.current = data }, [data])
   useEffect(() => { pageRef.current = page }, [page])
+  useEffect(() => { profileRef.current = profile }, [profile])
   useEffect(() => { navigateRef.current = onNavigate }, [onNavigate])
 
   const refreshStatus = useCallback(async () => {
@@ -154,7 +160,7 @@ export function HealthAssistant({
         }
       }
 
-      const healthContext = buildHealthAssistantContext(dataRef.current, archived, pageRef.current)
+      const healthContext = buildHealthAssistantContext(dataRef.current, archived, pageRef.current, profileRef.current)
       const requestId = crypto.randomUUID()
       const queue = createQueue()
       let fullText = ''
