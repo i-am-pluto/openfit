@@ -6,6 +6,12 @@ const { CLOCK_SKEW_SECONDS } = require('../core/identity.cjs')
 const { sameToken } = require('./auth.cjs')
 
 const SESSION_COOKIE = 'openfit_session'
+
+// Not issued here and never read: the release before Google sign-in set it for a
+// year on any `GET ?token=…` and it authorised every `/api/*` route with no
+// account and no epoch, so no revocation could reach it. server/auth.cjs no
+// longer accepts it, and every browser that still holds one is told to drop it.
+const LEGACY_TOKEN_COOKIE = 'openfit_token'
 const VERSION = 'v1'
 const MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 
@@ -74,7 +80,8 @@ function createSessions({ masterKey, secure = false }) {
     cookieString,
     cookie: (payload) => cookieString({ name: SESSION_COOKIE, value: sign(payload), maxAge: MAX_AGE_SECONDS }),
     clearCookie: () => cookieString({ name: SESSION_COOKIE, maxAge: 0 }),
+    clearLegacyTokenCookie: () => cookieString({ name: LEGACY_TOKEN_COOKIE, maxAge: 0 }),
   }
 }
 
-module.exports = { createSessions, deriveSessionKey, SESSION_COOKIE, MAX_AGE_SECONDS }
+module.exports = { createSessions, deriveSessionKey, SESSION_COOKIE, LEGACY_TOKEN_COOKIE, MAX_AGE_SECONDS }

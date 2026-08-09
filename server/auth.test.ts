@@ -10,7 +10,6 @@ const { createAuth, sameToken, TOKEN_FILE } = require('./auth.cjs') as {
     token: string
     isAuthorized: (request: unknown) => boolean
     presentedToken: (request: unknown) => string | null
-    setCookie: (response: { setHeader: (name: string, value: unknown) => void }) => void
   }
   sameToken: (a: unknown, b: unknown) => boolean
   TOKEN_FILE: string
@@ -40,12 +39,19 @@ describe('server auth', () => {
     expect(createAuth({ dir }).token).toBe(first.token)
   })
 
-  it('accepts the token from a bearer header, a cookie, or a query parameter', () => {
+  it('accepts the token from an Authorization header and from nowhere else', () => {
     const auth = createAuth({ dir: tempDir() })
 
     expect(auth.isAuthorized(requestWith({ authorization: `Bearer ${auth.token}` }))).toBe(true)
-    expect(auth.isAuthorized(requestWith({ cookie: `openfit_token=${auth.token}` }))).toBe(true)
-    expect(auth.isAuthorized(requestWith({}, `/?token=${auth.token}`))).toBe(true)
+
+    // A token in a URL is recorded in access logs, browser history and Referer
+    // headers, and `openfit_token` was a year-long cookie a previous release set
+    // on any tokenized page request: it named no account, carried no epoch, and
+    // so no "log out everywhere" could ever revoke it. Both channels are gone.
+    expect(auth.isAuthorized(requestWith({}, `/api/status?token=${auth.token}`))).toBe(false)
+    expect(auth.isAuthorized(requestWith({ cookie: `openfit_token=${auth.token}` }))).toBe(false)
+    expect(auth.isAuthorized(requestWith({ cookie: `openfit_token=${auth.token}` }, `/?token=${auth.token}`))).toBe(false)
+    expect(auth.presentedToken(requestWith({}, `/?token=${auth.token}`))).toBe(null)
   })
 
   it('rejects a missing, empty, wrong, or wrong-length token', () => {
@@ -66,15 +72,10 @@ describe('server auth', () => {
     expect(sameToken('same', 'same')).toBe(true)
   })
 
-  it('issues an HttpOnly, SameSite=Lax, path-scoped cookie', () => {
-    const auth = createAuth({ dir: tempDir() })
-    let cookie = ''
-    auth.setCookie({ setHeader: (_name, value) => { cookie = String(value) } })
-
-    expect(cookie).toContain(`openfit_token=${auth.token}`)
-    expect(cookie).toContain('HttpOnly')
-    expect(cookie).toContain('SameSite=Lax')
-    expect(cookie).toContain('Path=/')
+  it('issues no cookie of its own', () => {
+    // setCookie minted the year-long `openfit_token` credential. There is no
+    // way left to create one; server/session.cjs only knows how to clear it.
+    expect(createAuth({ dir: tempDir() })).not.toHaveProperty('setCookie')
   })
 
   it('prefers an explicitly supplied token over the file', () => {

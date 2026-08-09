@@ -5,9 +5,7 @@ const nodeFs = require('node:fs')
 const path = require('node:path')
 
 const TOKEN_FILE = 'server-token'
-const COOKIE_NAME = 'openfit_token'
 const TOKEN_BYTES = 32
-const COOKIE_MAX_AGE_SECONDS = 365 * 24 * 60 * 60
 
 function loadOrCreateToken({ dir, fs, randomBytes }) {
   const file = path.join(dir, TOKEN_FILE)
@@ -57,31 +55,27 @@ function createAuth(options = {}) {
 
   return {
     token,
-    cookieName: COOKIE_NAME,
 
+    /**
+     * The `Authorization` header and nothing else.
+     *
+     * `?token=` was read first until this branch, and a token in a URL is
+     * recorded in access logs, browser history and `Referer` headers — a
+     * standing leak of a credential that reaches every `/api/*` route.
+     *
+     * `openfit_token` was read too, and a previous release set it for a year on
+     * any tokenized page request. That cookie names no account and carries no
+     * epoch, so `bumpEpoch` could never revoke it: "log out everywhere" did
+     * nothing to a browser still holding one. Both channels are gone; the
+     * cookie is actively cleared by server/session.cjs's
+     * `clearLegacyTokenCookie`.
+     */
     presentedToken(request) {
-      const url = new URL(request.url, 'http://localhost')
-      const fromQuery = url.searchParams.get('token')
-      if (fromQuery) return fromQuery
-      const fromHeader = bearerFrom(request.headers?.authorization)
-      if (fromHeader) return fromHeader
-      return parseCookies(request.headers?.cookie)[COOKIE_NAME] || null
+      return bearerFrom(request.headers?.authorization)
     },
 
     isAuthorized(request) {
       return sameToken(this.presentedToken(request), token)
-    },
-
-    // Host-only; `Secure` is omitted because the tailnet URL is plain http unless
-    // the operator fronts it with `tailscale serve`.
-    setCookie(response) {
-      response.setHeader('Set-Cookie', [
-        `${COOKIE_NAME}=${encodeURIComponent(token)}`,
-        'Path=/',
-        'HttpOnly',
-        'SameSite=Lax',
-        `Max-Age=${COOKIE_MAX_AGE_SECONDS}`,
-      ].join('; '))
     },
   }
 }
@@ -162,4 +156,4 @@ function resolveAccount({ session, accounts, header }) {
   return ambiguous(all, 'This instance has more than one account. Name one with the X-OpenFit-Account header.')
 }
 
-module.exports = { createAuth, sameToken, parseCookies, bearerFrom, resolveAccount, usableSession, TOKEN_FILE, COOKIE_NAME }
+module.exports = { createAuth, sameToken, parseCookies, bearerFrom, resolveAccount, usableSession, TOKEN_FILE }

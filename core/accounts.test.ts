@@ -78,27 +78,28 @@ describe('accounts', () => {
     expect(account.dir).not.toContain('..')
   })
 
-  it('adopts root-level data on first sign-in when accounts/ is absent', () => {
+  it('leaves pre-existing root-level data where it is, for the first sign-in and every later one', () => {
+    // Adoption is gone. It granted the previous owner's Google refresh token and
+    // whole health archive to whoever signed in first, whatever their identity,
+    // and it moved the files rather than copying them, so the owner could not
+    // get them back. "First to sign in" proves nothing about who you are.
     const dataDir = tempDir()
-    fs.writeFileSync(path.join(dataDir, 'credentials.secure.json'), '{"encrypted":true}')
-    fs.writeFileSync(path.join(dataDir, 'health-cache.secure.json'), '{"encrypted":true}')
+    const credentials = path.join(dataDir, 'credentials.secure.json')
+    const cache = path.join(dataDir, 'health-cache.secure.json')
+    fs.writeFileSync(credentials, '{"encrypted":true,"owner":"first"}')
+    fs.writeFileSync(cache, '{"encrypted":true,"owner":"first"}')
 
-    const account = build(dataDir).resolve({ sub: '1', email: 'a@example.com' })
+    const stranger = build(dataDir).resolve({ sub: 'stranger', email: 'stranger@example.com' })
+    const later = build(dataDir).resolve({ sub: '1', email: 'a@example.com' })
 
-    expect(fs.existsSync(path.join(account.dir, 'credentials.secure.json'))).toBe(true)
-    expect(fs.existsSync(path.join(account.dir, 'health-cache.secure.json'))).toBe(true)
-    expect(fs.existsSync(path.join(dataDir, 'credentials.secure.json'))).toBe(false)
-  })
+    for (const dir of [stranger.dir, later.dir]) {
+      expect(fs.existsSync(path.join(dir, 'credentials.secure.json'))).toBe(false)
+      expect(fs.existsSync(path.join(dir, 'health-cache.secure.json'))).toBe(false)
+      expect(fs.readdirSync(dir)).toEqual(['account.json'])
+    }
 
-  it('does not adopt root-level data once an account exists', () => {
-    const dataDir = tempDir()
-    build(dataDir).resolve({ sub: '1', email: 'a@example.com' })
-    fs.writeFileSync(path.join(dataDir, 'credentials.secure.json'), '{"encrypted":true}')
-
-    const second = build(dataDir).resolve({ sub: '2', email: 'b@example.com' })
-
-    expect(fs.existsSync(path.join(second.dir, 'credentials.secure.json'))).toBe(false)
-    expect(fs.existsSync(path.join(dataDir, 'credentials.secure.json'))).toBe(true)
+    expect(fs.readFileSync(credentials, 'utf8')).toBe('{"encrypted":true,"owner":"first"}')
+    expect(fs.readFileSync(cache, 'utf8')).toBe('{"encrypted":true,"owner":"first"}')
   })
 
   it('returns null for a valid sub that has no account, and refuses to bump one', () => {

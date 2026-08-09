@@ -56,7 +56,7 @@ function sendJson(response, status, payload) {
   response.end(body)
 }
 
-function createServer({ staticRoot, token, dataDir, sessions, accounts, registry, loginDeps }) {
+function createServer({ staticRoot, token, dataDir, sessions, accounts, registry, loginDeps, heartbeatMs }) {
   // These three are what keeps one account's data away from another. A server
   // built without them would have to invent a default account, so it refuses.
   if (!sessions) throw new Error('createServer requires a session store.')
@@ -72,13 +72,19 @@ function createServer({ staticRoot, token, dataDir, sessions, accounts, registry
 
   healthRoutes.register({ add })
   assistantRoutes.register({ add })
-  eventRoutes.register({ add })
+  eventRoutes.register({ add, heartbeatMs })
   if (loginDeps) registerLoginRoutes({ addPublic, deps: loginDeps })
 
   const sendLoginPage = (response, { clearSession = false, message = '' } = {}) => {
     securityHeaders(response)
-    const headers = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }
-    if (clearSession) headers['set-cookie'] = sessions.clearCookie()
+    // The legacy `openfit_token` cookie is cleared on every sign-in page, not
+    // only on the ones that end a session. A browser upgraded from the previous
+    // release still holds one with a year to run, it can no longer authorise
+    // anything, and no revocation could ever have reached it — so it is dropped
+    // here rather than left in the jar until it expires.
+    const cookies = [sessions.clearLegacyTokenCookie()]
+    if (clearSession) cookies.unshift(sessions.clearCookie())
+    const headers = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'set-cookie': cookies }
     response.writeHead(200, headers)
     response.end(loginPage(message))
   }
@@ -159,7 +165,14 @@ function createServer({ staticRoot, token, dataDir, sessions, accounts, registry
       try {
         const body = request.method === 'POST' ? await readJsonBody(request) : {}
         const accountApp = registry.forAccount(resolved.account)
-        const result = await route.handle(request, response, { body, url, app: accountApp, account: resolved.account })
+        // Authorization is a per-request property, and one request here does not
+        // end: the SSE stream re-runs this exact resolution while it is open, so
+        // a session revoked mid-stream stops being served. It is the guard
+        // above, not a second copy of it.
+        const revalidate = () => resolveOrFail(request.headers['x-openfit-account'])
+        const result = await route.handle(request, response, {
+          body, url, app: accountApp, account: resolved.account, revalidate,
+        })
         if (!response.headersSent && !response.writableEnded) sendJson(response, 200, result ?? null)
       } catch (error) {
         if (response.headersSent) {

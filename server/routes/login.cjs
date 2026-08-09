@@ -230,7 +230,10 @@ function registerLoginRoutes({ addPublic, deps }) {
     response.writeHead(200, {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-store',
-      'set-cookie': [sessions.clearCookie(), clearPending()],
+      // The legacy `openfit_token` cookie goes too. It no longer authorises
+      // anything, but a signing-out browser is the one place this server can be
+      // sure to reach a device that still carries one.
+      'set-cookie': [sessions.clearCookie(), clearPending(), sessions.clearLegacyTokenCookie()],
     })
     response.end(JSON.stringify({ ok: true, revoked }))
   })

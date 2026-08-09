@@ -64,6 +64,7 @@ type ServerOptions = {
   emails?: Array<string>
   apps?: Record<string, any>
   getThrows?: boolean
+  heartbeatMs?: number
 }
 
 function stubAccounts(options: ServerOptions) {
@@ -81,7 +82,16 @@ function stubAccounts(options: ServerOptions) {
       return all.find((account) => account.sub === sub) ?? null
     }),
     list: vi.fn(() => all),
-    bumpEpoch: vi.fn(() => 3),
+    // Faithful again: a bump moves the stored epoch, so a later get() reports
+    // the new one and cookies carrying the old one stop verifying. A stub that
+    // returned a number without moving anything could not show revocation
+    // reaching a session it did not issue.
+    bumpEpoch: vi.fn((sub: string) => {
+      const account = all.find((entry) => entry.sub === sub)
+      if (!account) throw new Error('Unknown account.')
+      account.epoch += 1
+      return account.epoch
+    }),
     resolve: vi.fn(),
   }
 }
@@ -114,6 +124,7 @@ async function withServer(app: any, options: ServerOptions = {}) {
 
   const { server, token } = createServer({
     staticRoot, dataDir, token: 'test-token', sessions, accounts, registry, loginDeps,
+    heartbeatMs: options.heartbeatMs,
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const base = `http://127.0.0.1:${server.address().port}`
@@ -237,6 +248,62 @@ describe('server routes', () => {
 
     controller.abort()
     await vi.waitFor(() => expect(app.events.listenerCount('assistant')).toBe(0))
+  })
+
+  it('closes an open SSE stream once the session behind it is revoked', async () => {
+    // Authorization is a per-request property and this request never ends. A
+    // revoked browser — a lost laptop with an open tab — kept receiving sync
+    // progress and assistant output until the heartbeat learned to re-check.
+    const app = stubApp()
+    const { base, sessionCookie } = await withServer(app, { heartbeatMs: 25 })
+
+    const stream = await fetch(`${base}/api/events`, { headers: { cookie: sessionCookie } })
+    await vi.waitFor(() => expect(app.events.listenerCount('sync-progress')).toBe(1))
+
+    const drained = (async () => {
+      const reader = stream.body!.getReader()
+      const decoder = new TextDecoder()
+      let text = ''
+      for (;;) {
+        const { value, done } = await reader.read()
+        if (done) return text
+        text += decoder.decode(value, { stream: true })
+      }
+    })()
+
+    // Signed out everywhere from another device, exactly as the account menu does.
+    const loggedOut = await fetch(`${base}/auth/logout`, {
+      method: 'POST',
+      headers: { cookie: sessionCookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ everywhere: true }),
+    })
+    expect(await loggedOut.json()).toEqual({ ok: true, revoked: true })
+
+    const text = await drained
+    expect(app.events.listenerCount('sync-progress')).toBe(0)
+
+    // Nothing this account's app emits after the revocation can reach it.
+    app.events.emit('sync-progress', { completed: 1, total: 4, key: 'steps' })
+    expect(text).not.toContain('sync-progress')
+  })
+
+  it('keeps a still-valid stream open across heartbeats', async () => {
+    const app = stubApp()
+    const { base, sessionCookie } = await withServer(app, { heartbeatMs: 25 })
+
+    const stream = await fetch(`${base}/api/events`, { headers: { cookie: sessionCookie } })
+    const reader = stream.body!.getReader()
+    const decoder = new TextDecoder()
+    let text = ''
+    while (!text.includes(': ping')) {
+      const { value, done } = await reader.read()
+      if (done) break
+      text += decoder.decode(value, { stream: true })
+    }
+
+    expect(text).toContain(': ping')
+    expect(app.events.listenerCount('sync-progress')).toBe(1)
+    await reader.cancel()
   })
 
   it('falls back to the shell for unknown paths but 404s unknown API routes', async () => {
@@ -375,15 +442,30 @@ describe('session and bearer guards', () => {
     expect(await shell.text()).toContain('Sign in with Google')
   })
 
-  it('no longer exchanges a tokenized link for a cookie', async () => {
+  it('no longer exchanges a tokenized link for a cookie, and clears the legacy one', async () => {
     const { base, token } = await withServer(stubApp())
     const response = await fetch(`${base}/?token=${token}`, { redirect: 'manual' })
+    const cookies = response.headers.getSetCookie()
 
     // Tokenized browser URLs are gone: the token travelled in history and in
-    // referrers, and it authorises /api/* rather than a person.
+    // referrers, and it authorises /api/* rather than a person. The only cookie
+    // left in the response is the one that deletes the legacy credential.
     expect(response.status).toBe(200)
-    expect(response.headers.get('set-cookie')).toBeNull()
+    expect(cookies).toEqual([expect.stringContaining('openfit_token=;')])
+    expect(cookies[0]).toContain('Max-Age=0')
+    expect(cookies.join('\n')).not.toContain(token)
     expect(await response.text()).toContain('Sign in with Google')
+  })
+
+  it('refuses the server token presented as a query parameter or the legacy cookie', async () => {
+    const { base, token } = await withServer(stubApp())
+
+    // Both channels authorised /api/* until this fix. The cookie was the worse
+    // of the two: a previous release set it for a year and no epoch bump could
+    // reach it, so "log out everywhere" did nothing to a browser holding one.
+    expect((await fetch(`${base}/api/status?token=${token}`)).status).toBe(401)
+    expect((await fetch(`${base}/api/status`, { headers: { cookie: `openfit_token=${token}` } })).status).toBe(401)
+    expect((await fetch(`${base}/api/status`, { headers: { authorization: `Bearer ${token}` } })).status).toBe(200)
   })
 
   it('rejects a session cookie whose epoch is stale', async () => {

@@ -6,7 +6,6 @@ const path = require('node:path')
 
 const ACCOUNTS_DIR = 'accounts'
 const ACCOUNT_FILE = 'account.json'
-const ADOPTABLE = ['credentials.secure.json', 'health-cache.secure.json']
 const ID = /^[0-9a-f]{16}$/
 
 // `sub` arrives from a Google ID token, so it is hostile input. Coercing it with
@@ -81,14 +80,13 @@ function createAccounts({ dataDir, secrets, fs = nodeFs }) {
 
   const present = (record, sub, dir) => ({ ...record, id: accountId(sub), dir })
 
-  function adoptRootData(dir) {
-    for (const name of ADOPTABLE) {
-      const from = path.join(dataDir, name)
-      if (!fs.existsSync(from)) continue
-      fs.renameSync(from, path.join(dir, name))
-      console.log(`Adopted ${name} into ${path.basename(dir)}.`)
-    }
-  }
+  // Nothing is inherited here. An earlier revision moved any root-level
+  // `credentials.secure.json` and `health-cache.secure.json` into the first
+  // account to sign in, whoever that turned out to be — a stranger who reached
+  // the instance first was handed the previous owner's Google refresh token and
+  // whole health archive, and the files were moved rather than copied, so the
+  // owner could not get them back. "First to sign in" is not a proof of
+  // identity, so root-level data is left where it is and ignored.
 
   return {
     directoryFor,
@@ -137,16 +135,12 @@ function createAccounts({ dataDir, secrets, fs = nodeFs }) {
       const owner = assertSub(sub)
       const address = assertEmail(email)
 
-      // Adoption is gated on accounts/ being absent, so it can only ever run
-      // for the very first sign-in.
-      const firstEver = !fs.existsSync(root)
       const dir = directoryFor(owner)
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
       // mkdir's mode is masked by the umask and ignored outright when the
       // directory already exists, so 0700 is asserted rather than requested.
       fs.chmodSync(root, 0o700)
       fs.chmodSync(dir, 0o700)
-      if (firstEver) adoptRootData(dir)
 
       const existing = readOwned(owner, dir)
       const record = existing
