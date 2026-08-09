@@ -14,10 +14,12 @@ The renderer uses React, shadcn/Radix, Tailwind CSS v4, assistant-ui, Inter Vari
 
 > Project status: the server is complete and buildable. Signing in requires an OAuth client in your own Google Cloud project, supplied through `.env`.
 >
-> **The Electron desktop app does not run on this branch.** `electron/main.cjs`
-> still builds the HTTP server the old way and has not been updated for Google
-> sign-in, so it fails at startup. `npm run dev:electron`, `npm run capture:ui`,
-> and `npm run dist` are all affected. Use `npm run serve`.
+> **The desktop app runs the same backend, on a fixed loopback port.** It binds
+> `http://127.0.0.1:7790` and starts sign-in in your real browser, so
+> `http://127.0.0.1:7790/auth/callback` has to be registered on the OAuth client
+> as well. See [the desktop app](docs/SELF_HOSTING.md#the-desktop-app) — a
+> **packaged** build additionally needs a `.env` you place in its user data
+> directory by hand, and has never been run end to end.
 
 ## How Fitbit data reaches OpenFit
 
@@ -65,8 +67,8 @@ Then open the URL the banner prints and sign in with Google.
 > **7789**, so its redirect URI is `http://127.0.0.1:7789/auth/callback` — a
 > different origin from `npm run serve`. Register that URI on the same OAuth
 > client too, or Google answers with `redirect_uri_mismatch`. `npm run dev` also
-> starts Electron, which does not run on this branch; `npm run dev:api` and
-> `npm run dev:web` in two terminals avoid it.
+> starts Electron against the Vite page, where the API lives in another process;
+> sign in at `http://127.0.0.1:5173` in a browser rather than in that window.
 
 Full setup, access control, sign-out, and `systemd` notes are in the
 [self-hosting guide](docs/SELF_HOSTING.md).
@@ -78,12 +80,13 @@ npm run build       # Type-check and bundle the renderer
 npm run serve       # Build, then host on the local network (needs .env)
 npm test            # Run normalizer, adapter, agent, and server tests
 npm run check       # Type-check, syntax-check, test, and build
-npm run capture:ui  # Electron visual QA — broken on this branch, see the status note
-npm run dist        # Package the desktop app — broken on this branch, see the status note
+npm run capture:ui  # Electron visual QA against a running dev server
+npm run dist        # Package the desktop app
 ```
 
-Packaging is documented in the [release checklist](docs/RELEASE.md), but produces
-a non-starting app until the Electron composition root is updated.
+Packaging is documented in the [release checklist](docs/RELEASE.md). A packaged
+build reads its Google client from a `.env` in its own user data directory, not
+from the repository; nobody has yet run one end to end.
 
 ## Connect Google Health
 
@@ -160,7 +163,12 @@ Do not add write scopes. OpenFit also requests the standard `openid` and `profil
    Add `http://127.0.0.1:7789/auth/callback` as well if you develop with
    `npm run dev` — `dev:api` listens on 7789, so that is a different origin.
 
-   Add a third entry if you also reach OpenFit over an HTTPS tailnet origin:
+   Add `http://127.0.0.1:7790/auth/callback` if you use the desktop app. It
+   binds that one fixed port on purpose: a **Web application** client must have
+   every redirect URI registered exactly, port included, and only a **Desktop
+   app** client may use an arbitrary loopback port.
+
+   Add another entry if you also reach OpenFit over an HTTPS tailnet origin:
 
    ```text
    https://your-host.tail-abc123.ts.net/auth/callback
@@ -215,6 +223,7 @@ A Client Secret distributed in a desktop binary is not a durable global secret. 
 `OPENFIT_GOOGLE_CLIENT_ID is not set`
 
 - The server has no `.env` and no service environment. It exits 1 before creating a data directory. Under `npm run dev` this also kills Vite and Electron.
+- A **packaged** desktop app reads `.env` from its user data directory, not from a checkout, and says so in the dialog it shows before quitting.
 
 `Sign-in took too long. Start again.`
 
@@ -264,7 +273,8 @@ core/                         Transport-agnostic backend (no Electron, no HTTP)
   providers/                  Google Health v4 and legacy Fitbit adapters
   agents/                     Assistant backends behind one interface
 server/
-  bin.cjs                     CLI entry, composition root, address discovery, banner
+  bin.cjs                     CLI entry, address discovery, banner
+  compose.cjs                 The composition root both hosts build their backend with
   env.cjs                     Reads the OAuth client from .env and the environment
   index.cjs                   HTTP wiring, session/bearer gate, account resolution
   auth.cjs                    Bearer token and account resolution rules
@@ -273,7 +283,7 @@ server/
   static.cjs                  dist/ serving with security headers
   routes/                     health, assistant, events (SSE), login
 electron/
-  main.cjs                    Desktop shell — not updated for sign-in; does not start
+  main.cjs                    Desktop shell: same backend on 127.0.0.1:7790, browser sign-in
 src/
   components/                 Views, charts, and assistant-ui chat
   data/                       Demo data and provider-independent normalization

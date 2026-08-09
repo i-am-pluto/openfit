@@ -102,6 +102,8 @@ Do not select write scopes. OpenFit also requests the standard `openid` and `pro
 
    Add `http://127.0.0.1:7789/auth/callback` too if you will develop with `npm run dev`; `dev:api` listens on 7789, which is a different origin.
 
+   Add `http://127.0.0.1:7790/auth/callback` if you will use the desktop app. It binds that one fixed port deliberately: an arbitrary loopback port is allowed only for a **Desktop app** client, and this is a **Web application** client, so every port must be registered.
+
    Add another entry if you will also reach OpenFit over an HTTPS tailnet origin:
 
    ```text

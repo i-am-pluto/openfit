@@ -22,9 +22,16 @@
 
 `core/app.cjs` is not a singleton. It builds one account's capabilities from one
 data directory, and the server holds one of them per signed-in account. The
-composition root is `server/bin.cjs`: it reads the OAuth client from the
-environment, builds the shared secret store, the accounts store, the session
-store, and the account registry, and hands them to `createServer`.
+composition root is `server/compose.cjs`: it validates the origin, freezes the
+OAuth identity, derives the `Secure` cookie flag from that origin, and builds
+the shared secret store, the accounts store, the session store, and the account
+registry before handing them to `createServer`.
+
+Both hosts go through it. `server/bin.cjs` adds argument parsing, address
+discovery and the banner; `electron/main.cjs` adds a fixed loopback port, the
+OS keychain, and a window. Composing the same pieces twice is how the desktop
+host silently stopped starting, so there is now one place to compose them and
+`electron/main.test.ts` asserts that it does.
 
 ```mermaid
 flowchart LR
@@ -47,9 +54,13 @@ flowchart LR
     Server -->|bearer token, /api only| Automation["curl / scripts"]
 ```
 
-> `electron/main.cjs` has not been recomposed for this shape. It still calls
-> `createServer` with a single app and no session, accounts, or registry, which
-> `createServer` refuses, so the desktop app does not start on this branch.
+> `electron/main.cjs` runs the same graph inside the Electron main process,
+> bound to `http://127.0.0.1:7790`. Because Google's consent screen is
+> unreliable in an embedded user agent, the window hands `/auth/login` to the
+> real browser; the browser's cookie jar is not the window's, so the callback —
+> which is handled in this same process — mints the window an equivalent
+> session cookie directly. See
+> [SELF_HOSTING.md](SELF_HOSTING.md#the-desktop-app).
 
 ## Accounts
 

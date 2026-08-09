@@ -1,10 +1,23 @@
 # Desktop Release
 
-> **Blocked on this branch.** `electron/main.cjs` has not been recomposed for
-> Google sign-in: it calls `createServer` without a session store, an accounts
-> store, or an account registry, which `createServer` refuses. `npm run dist`
-> still produces artifacts, but the packaged app fails at startup. Nothing below
-> is worth doing until the Electron composition root is fixed.
+> **Not yet exercised end to end.** `electron/main.cjs` is composed and covered
+> by `electron/main.test.ts`, but no packaged artifact has been launched against
+> a real Google client on this branch. Two things must be true before one works,
+> and neither is something the build can arrange:
+>
+> - `http://127.0.0.1:7790/auth/callback` is registered on the OAuth client. The
+>   desktop app binds that one fixed port because a **Web application** client
+>   must have every redirect URI registered exactly.
+> - A `.env` holding `OPENFIT_GOOGLE_CLIENT_ID` and `OPENFIT_GOOGLE_CLIENT_SECRET`
+>   exists in the app's user data directory. `.env` is not in the `files` list
+>   below and `app.asar` is read-only, so a packaged build cannot carry one; it
+>   reads the user data directory instead and shows a dialog naming the path
+>   when the file is absent. See
+>   [SELF_HOSTING.md](SELF_HOSTING.md#where-a-packaged-app-reads-env).
+>
+> A distributable build therefore targets someone who owns a Google Cloud
+> project, not a general audience. Shipping a Client Secret inside a binary
+> would not make it a secret.
 
 ## Local Package Status
 

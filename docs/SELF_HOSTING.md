@@ -3,11 +3,9 @@
 OpenFit runs as a small HTTP server you sign in to with Google. Use this when
 you want the dashboard on your phone or another laptop over Tailscale.
 
-> **The desktop app does not run on this branch.** `electron/main.cjs` has not
-> been updated for Google sign-in: it calls `createServer` without a session
-> store, an accounts store, or an account registry, and the server refuses to be
-> built that way. `npm run dev:electron` and `npm run dist` produce an app that
-> fails at startup. Use the server until that composition root is fixed.
+The Electron desktop app runs the same backend inside its own process. It is
+covered in [The desktop app](#the-desktop-app) below; everything about sign-in,
+accounts, revocation, and data at rest applies to both.
 
 ## Before you start: `.env` is required
 
@@ -42,6 +40,7 @@ Register every origin you will actually use:
 | --- | --- | --- |
 | `npm run serve` on this machine | `http://127.0.0.1:7788` | `http://127.0.0.1:7788/auth/callback` |
 | `npm run dev` (the API listens on **7789**) | `http://127.0.0.1:7789` | `http://127.0.0.1:7789/auth/callback` |
+| The desktop app (fixed port **7790**) | `http://127.0.0.1:7790` | `http://127.0.0.1:7790/auth/callback` |
 | Behind `tailscale serve`, `OPENFIT_PUBLIC_ORIGIN` set | that origin | `https://<host>.ts.net/auth/callback` |
 
 A different `--port` means a different origin and therefore another entry. This
@@ -75,9 +74,11 @@ cookies are not scoped by port, so the cookie Google's callback sets on
 `127.0.0.1:7789` is sent on `127.0.0.1:5173` too. The callback itself lands on
 7789; go back to 5173 afterwards.
 
-`npm run dev` also starts Electron, which does not run on this branch (see the
-note at the top). `npm run dev:api` and `npm run dev:web` in two terminals give
-you the same server and dev page without it.
+`npm run dev` also starts Electron pointed at the Vite page. That window shares
+no cookie jar with the browser and no process with `dev:api`, so it cannot
+complete a sign-in; test sign-in at `http://127.0.0.1:5173` in a browser.
+`npm run dev:api` and `npm run dev:web` in two terminals give you the same
+server and dev page without the window.
 
 ## Start the server
 
@@ -199,6 +200,101 @@ The account menu offers two actions:
 Sessions also expire on their own after 30 days, enforced server-side from the
 signed timestamp inside the cookie rather than from its `Max-Age`.
 
+## The desktop app
+
+The Electron app is a second host over the same backend: `electron/main.cjs` and
+`server/bin.cjs` both call `server/compose.cjs`, so the session store, the
+accounts index, the per-account registry and the login routes are wired once and
+identically. What differs is the port it binds, where it reads `.env`, and where
+sign-in happens.
+
+### It binds one fixed port
+
+`http://127.0.0.1:7790`, always. Register `http://127.0.0.1:7790/auth/callback`
+on the same OAuth client. The port cannot be ephemeral: Google accepts an
+arbitrary loopback port only for a **Desktop app** client, and OpenFit's client
+is a **Web application** client, which must have every redirect URI registered
+exactly, port included.
+
+If the port is taken the app shows a dialog and quits rather than starting on
+another one, because another port is a redirect URI Google was never told about.
+A second copy of the app hands the window to the first instead of racing for the
+port.
+
+### Sign-in happens in your browser
+
+Clicking **Sign in with Google** does not navigate the app window. It opens
+`http://127.0.0.1:7790/auth/login` in your real browser, which is where the
+Google consent screen is shown. Google's policy on embedded user agents makes
+rendering consent inside an application window unreliable and is officially
+discouraged, and an app window that hits `disallowed_useragent` is a dead end
+with no way out.
+
+Your browser therefore holds the whole flow: the pending cookie, the consent,
+and the callback. **A cookie set in your browser is not visible to the app** —
+they are separate cookie jars, and the fact that cookies are not port-scoped
+does not bridge them. What makes the window sign in is that the HTTP server runs
+*inside* the app: when the callback completes, the same process mints an
+equivalent session cookie into the window's own jar and reloads it.
+
+Two consequences:
+
+- Only a sign-in the window itself started is adopted. Anything on the machine
+  can reach a loopback port, and without that check another local user could
+  complete their own Google sign-in against port 7790 and silently move the
+  window onto their account.
+- **Sign out** in the window clears the window's session. The browser tab that
+  did the sign-in keeps its own until you sign out there too, or use *sign out
+  everywhere*, which bumps the account's epoch and invalidates both.
+
+### Where a packaged app reads `.env`
+
+Run from a checkout — `npm run dev`, `electron .` — the desktop app reads the
+repository's `.env`, the same file the server reads.
+
+A **packaged** app cannot. It runs from inside `app.asar`, which is a read-only
+archive, is not a directory anyone can open in an editor, and does not contain
+`.env` at all — it is not in electron-builder's `files` list. `process.loadEnvFile`
+is native code that does not go through Electron's asar-aware `fs`, so it could
+not read the file from there even if it were packaged. A packaged build
+therefore reads `.env` from its **user data directory**:
+
+| Platform | Path |
+| --- | --- |
+| Linux | `~/.config/pulseboard-fitbit-desktop/.env` |
+| macOS | `~/Library/Application Support/pulseboard-fitbit-desktop/.env` |
+| Windows | `%APPDATA%\pulseboard-fitbit-desktop\.env` |
+
+`OPENFIT_USER_DATA` overrides the directory, and variables already in the
+environment are used as they are. The directory name is the historical one on
+purpose: `safeStorage` keys are tied to it, and renaming it would strand
+existing desktop users' stored credentials.
+
+Create that file by hand before first run. Without it the app shows a dialog
+naming the exact path and quits — it does not fall back to an empty client and
+open a window that cannot do anything.
+
+**Be honest about what this means for distribution.** A packaged OpenFit is
+usable by someone who owns a Google Cloud project: they must create the OAuth
+client, register `http://127.0.0.1:7790/auth/callback`, and place `.env`
+themselves. It is not a build you can hand to someone who has none of that, and
+a Client Secret shipped inside a binary would not be a secret in any case.
+`npm run dist` has not been run end to end against a real Google client on this
+branch; the composition is covered by `electron/main.test.ts`, packaging is not.
+
+### What the desktop host does not do
+
+- **`OPENFIT_PUBLIC_ORIGIN` is ignored**, with a warning on stderr. The desktop
+  host is reachable over plain-http loopback and nothing else: `Secure` cookies
+  would never be sent back to it, and Google would deliver the callback to the
+  public origin instead of to this process. A shared `.env` that configures the
+  server for a tailnet is fine; that variable simply does not apply here.
+- **It does not listen on anything but `127.0.0.1`.** To reach OpenFit from
+  another device, run the server.
+- It stores data under its user data directory, not the server's data directory,
+  and prefers `safeStorage` there. See [Data at rest](#data-at-rest) — a
+  `safeStorage` envelope written by the desktop app cannot be read by the server.
+
 ## Access control
 
 Two independent ways in, with different reach:
@@ -309,6 +405,10 @@ both reuse their own local login, and OpenFit never stores an API key.
 | --- | --- |
 | `OPENFIT_GOOGLE_CLIENT_ID is not set` | No `.env` and no service environment. See *Before you start*. |
 | `npm run dev` exits immediately, Vite and Electron die with it | Same cause: `dev:api` exits 1 and `concurrently -k` kills its siblings. |
+| The desktop app shows a dialog naming a `.env` path and quits | A packaged build reads `.env` from its user data directory, not from a checkout. See [The desktop app](#the-desktop-app). |
+| The desktop app says port 7790 is in use | Another copy is already running, or something else took the port. The port is fixed because it is in the registered redirect URI. |
+| Clicking sign-in in the desktop app opens a browser | By design. Google's consent screen is unreliable inside an application window; the window picks up the session when the callback completes. |
+| The desktop window stays on the sign-in page after signing in in the browser | The window only adopts a sign-in it started itself, and only within ten minutes. Click **Sign in with Google** in the window and finish that flow. |
 | Health disconnected after about a week | Google expires refresh tokens for apps in testing after 7 days. Sign in again — **Reconnect** in the app, which forces a fresh consent. You are not signed out; only health access lapsed. |
 | The sign-in page comes back instead of the dashboard | The session cookie is missing, expired, or revoked by a *sign out everywhere*. Sign in again. |
 | `Sign-in took too long. Start again.` | The pending cookie is older than 10 minutes, or the browser started at one origin and Google returned to another. Start from the origin registered with the OAuth client. |
