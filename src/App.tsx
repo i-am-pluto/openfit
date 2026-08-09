@@ -338,6 +338,19 @@ export default function App() {
   // cleared again. There is nothing to configure first: the OAuth client comes
   // from the server's environment.
   const connect = async () => {
+    // `hasBackend` is the server's own signal that this status was actually read
+    // — `defaultStatus` has it false, and a failed /api/status leaves it that
+    // way. Only a status we really received can testify that the server has no
+    // OAuth client. Claiming it from the default blamed a missing .env on every
+    // transient status failure, which is a diagnosis this code cannot make.
+    if (!status.hasBackend) {
+      setToast({
+        tone: 'error',
+        message: 'This OpenFit server has not reported its configuration yet. Retrying — if this persists, reload the page.',
+      })
+      void loadNativeState()
+      return
+    }
     if (!status.configured) {
       setToast({
         tone: 'error',
