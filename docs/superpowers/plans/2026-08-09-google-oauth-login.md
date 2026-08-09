@@ -352,10 +352,15 @@ function decodeIdToken(idToken) {
 function validateIdToken(idToken, { clientId, nonce, now = Math.floor(Date.now() / 1000) }) {
   const claims = decodeIdToken(idToken)
 
-  if (!ISSUERS.has(String(claims.iss))) throw new Error('The Google ID token has an unexpected issuer.')
-  if (String(claims.aud) !== String(clientId)) throw new Error('The Google ID token has an unexpected audience.')
-  if (String(claims.nonce || '') !== String(nonce)) throw new Error('The Google ID token nonce does not match.')
-  if (Number(claims.exp || 0) < now - CLOCK_SKEW_SECONDS) throw new Error('The Google ID token has expired.')
+  // Every check must fail closed. String()/Number() coercion fails OPEN here:
+  // Number('nonsense') is NaN and NaN < x is false, so a non-numeric exp would
+  // skip expiry entirely; String(undefined) === String(undefined) makes an
+  // absent claim match an absent expectation; String(['x']) === 'x' lets an
+  // array audience through. Require the claim's type AND a present expectation.
+  if (typeof claims.iss !== 'string' || !ISSUERS.has(claims.iss)) throw new Error('The Google ID token has an unexpected issuer.')
+  if (typeof claims.aud !== 'string' || !clientId || claims.aud !== String(clientId)) throw new Error('The Google ID token has an unexpected audience.')
+  if (typeof claims.nonce !== 'string' || !nonce || claims.nonce !== String(nonce)) throw new Error('The Google ID token nonce does not match.')
+  if (!Number.isFinite(claims.exp) || claims.exp < now - CLOCK_SKEW_SECONDS) throw new Error('The Google ID token has expired.')
 
   const sub = String(claims.sub || '')
   const email = String(claims.email || '')
