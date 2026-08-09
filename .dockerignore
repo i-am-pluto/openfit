@@ -1,0 +1,25 @@
+.git
+.github
+node_modules
+dist
+release
+.artifacts
+screenshots
+.dev-data
+*.tsbuildinfo
+*.log
+
+# The Google client secret is supplied at run time through env_file, never baked
+# into an image layer.
+.env
+
+# Not part of the server host.
+electron
+build
+docs
+scripts
+.remember
+.superpowers
+Dockerfile
+compose.yml
+.dockerignore

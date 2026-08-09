@@ -458,6 +458,86 @@ journalctl -u openfit -f   # the startup banner prints the sign-in URL
 The unit deliberately omits `--dev`, so the server refuses to start if
 `dist/index.html` is missing rather than serving nothing.
 
+## Running it in Docker
+
+The image is the server host only; the Electron app is not containerised. Because
+`server/` and `core/` import nothing but `node:` builtins, the runtime stage
+carries the built renderer and no dependency tree at all — the build toolchain
+stays in a stage that is thrown away.
+
+```bash
+sudo apt-get install -y docker.io docker-compose-v2
+sudo usermod -aG docker "$USER"    # log out and back in for this to take effect
+sudo systemctl enable --now docker
+
+docker compose up -d --build
+docker compose logs -f             # the startup banner prints the sign-in URL
+```
+
+Two extra variables belong in `.env`, naming the host side of the bind mounts:
+
+```bash
+OPENFIT_HOST_DATA_DIR=/home/you/.local/share/openfit
+OPENFIT_HOST_CLAUDE_DIR=/home/you/.claude
+```
+
+They are absolute, and Compose refuses to start without them, because `${HOME}`
+would be wrong in exactly the case that matters: under `sudo docker compose` it
+resolves to `/root`, and Docker would create that empty directory and mount it
+over `/data` rather than failing. An instance that silently starts with no
+accounts and no `master.key` is worse than one that does not start.
+
+`restart: unless-stopped` on an **enabled** `docker.service` is what makes it
+always-running: it comes back from a crash, a daemon restart and a reboot, and
+stays down only when you stop it yourself. Enabling the daemon is the half that
+is easy to miss — the restart policy alone does nothing across a reboot.
+
+### What is mounted
+
+| Host path | In the container | Why |
+| --- | --- | --- |
+| `~/.local/share/openfit` | `/data` | `master.key`, `server-token`, and every account's encrypted archive. The same directory the bare server uses, so moving into Docker keeps your accounts rather than starting empty. |
+| `~/.claude` | `/home/node/.claude` | The assistant CLI's login. Read-write and shared with the host on purpose: a token the CLI refreshes stays valid on both sides, and a read-only mount would break the assistant the first time the token expired. |
+| `.env` | nothing | Injected as environment by `env_file`, so the client secret is in no image layer. The two `OPENFIT_HOST_*` variables above are read by Compose itself, not by the server. |
+
+The container runs as uid 1000 — the `node` user in the image, and your user on
+the host — so the `0700` data directory needs no `chown` to be readable.
+
+### Ports and sign-in
+
+The port is published on `127.0.0.1:7788` only. The origin Google redirects to is
+the one `tailscale serve` fronts, not the container's:
+
+```bash
+tailscale serve --bg --https 443 http://127.0.0.1:7788
+```
+
+Set `OPENFIT_PUBLIC_ORIGIN` to that HTTPS origin in `.env` and register
+`<origin>/auth/callback`. Nothing about sign-in changes when the server moves
+into a container: the redirect URI already names the proxy, and the proxy still
+finds the server on the same loopback port.
+
+To reach it from the LAN instead, publish `7788:7788`. A bare
+`http://<lan-ip>:7788` origin still cannot complete a Google sign-in, for the
+reason in [Signing in](#signing-in).
+
+### Rebuilding
+
+```bash
+docker compose up -d --build    # after pulling new code
+docker compose restart          # a change to .env only
+```
+
+The renderer is built inside the image, so unlike the systemd unit there is no
+separate `npm run build` to remember.
+
+| Symptom | Cause |
+| --- | --- |
+| `permission denied ... /var/run/docker.sock` | Your shell predates `usermod -aG docker`. Log out and back in. |
+| The container restarts in a loop | The same missing-`.env` cause as the systemd unit. `docker compose logs` has the one line. |
+| `Bind for 127.0.0.1:7788 failed: port is already allocated` | A bare `node server/bin.cjs` is still running. Stop it first. |
+| Assistant reports no backend | `~/.claude` is not signed in on the host, or the mount is absent. |
+
 ## The health assistant
 
 The assistant backend is discovered at runtime; see [AGENTS.md](AGENTS.md). On a

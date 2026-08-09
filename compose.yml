@@ -1,0 +1,46 @@
+name: openfit
+
+services:
+  openfit:
+    build: .
+    image: openfit:local
+    container_name: openfit
+    # Survives crashes, daemon restarts and reboots, but stays down if you stop
+    # it deliberately. Requires docker.service to be enabled at boot.
+    restart: unless-stopped
+
+    # The Google client. Not baked into the image; keep the file at mode 0600.
+    env_file: .env
+
+    # Loopback only. `tailscale serve` on the host already fronts 127.0.0.1:7788
+    # with HTTPS, and that origin is what OPENFIT_PUBLIC_ORIGIN and the
+    # registered redirect URI name. Publishing on 0.0.0.0 would expose an origin
+    # sign-in cannot complete on anyway.
+    ports:
+      - "127.0.0.1:7788:7788"
+
+    volumes:
+      # master.key, server-token and every account's encrypted archive. Back this
+      # up: without master.key the archive cannot be read.
+      - ${OPENFIT_HOST_DATA_DIR:?set OPENFIT_HOST_DATA_DIR in .env}:/data
+
+      # The assistant's CLI login, shared with the host so a refreshed token is
+      # refreshed for both. Read-write on purpose: read-only breaks the CLI once
+      # its token expires.
+      - ${OPENFIT_HOST_CLAUDE_DIR:?set OPENFIT_HOST_CLAUDE_DIR in .env}:/home/node/.claude
+
+      # Keeps the CLI's own config (~/.claude.json) across container recreates
+      # without sharing it with the host copy.
+      - agent-home:/home/node
+
+    security_opt:
+      - no-new-privileges:true
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  agent-home:
