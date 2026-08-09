@@ -21,6 +21,14 @@ const PENDING_KIND = 'pending'
 // victim — `prompt=none` most of all, which suppresses the consent screen.
 const PROMPTS = new Set(['consent', 'select_account'])
 
+// With `access_type=offline` Google issues a refresh token only on a user's
+// FIRST authorization of a client — every later one returns an access token
+// alone unless consent is re-requested. A testing-mode refresh token expires
+// after seven days, so somebody signing back in after that would otherwise get
+// an hour of access and no way to renew it, and background sync would stop for
+// good. Defaulting to `consent` is what makes a return visit restore syncing.
+const DEFAULT_PROMPT = 'consent'
+
 // An opaque handle a host may attach to one sign-in so it can recognise *that*
 // sign-in when the callback completes. The desktop host mints one per click and
 // compares it in `onAuthorized`; without it, "a sign-in was started here
@@ -87,7 +95,7 @@ function registerLoginRoutes({ addPublic, deps }) {
     const challenge = base64Url(crypto.createHash('sha256').update(verifier).digest())
 
     const requested = url.searchParams.get('prompt')
-    const prompt = PROMPTS.has(requested) ? requested : undefined
+    const prompt = PROMPTS.has(requested) ? requested : DEFAULT_PROMPT
     const flowId = requestedFlowId(url)
 
     // The pending values are signed into a short-lived cookie rather than held

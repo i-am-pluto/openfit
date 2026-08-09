@@ -147,7 +147,8 @@ describe('login routes', () => {
   })
 
   // `prompt` arrives in the query string. Forwarding it verbatim would let a crafted
-  // link choose Google's behaviour for the victim, `prompt=none` above all.
+  // link choose Google's behaviour for the victim, `prompt=none` above all. A
+  // rejected value falls back to the default rather than to nothing.
   it('forwards only allow-listed prompt values', async () => {
     const deps = buildDeps()
     const routes = collect(deps)
@@ -155,11 +156,27 @@ describe('login routes', () => {
     await signIn(routes, '?prompt=consent')
     expect(deps.authorizationUrl.mock.calls[0][0]).toMatchObject({ prompt: 'consent' })
 
+    await signIn(routes, '?prompt=select_account')
+    expect(deps.authorizationUrl.mock.calls[1][0]).toMatchObject({ prompt: 'select_account' })
+
     await signIn(routes, '?prompt=none')
-    expect(deps.authorizationUrl.mock.calls[1][0].prompt).toBeUndefined()
+    expect(deps.authorizationUrl.mock.calls[2][0].prompt).toBe('consent')
 
     await signIn(routes, '?prompt=' + encodeURIComponent('consent&scope=evil'))
-    expect(deps.authorizationUrl.mock.calls[2][0].prompt).toBeUndefined()
+    expect(deps.authorizationUrl.mock.calls[3][0].prompt).toBe('consent')
+  })
+
+  // Google issues a refresh token only on a user's first authorization of a
+  // client unless consent is re-requested. Without this, somebody signing back
+  // in after the seven-day testing-mode expiry would get an access token with
+  // no way to renew it, and background sync would never resume.
+  it('asks for consent by default so a returning user gets a new refresh token', async () => {
+    const deps = buildDeps()
+    const routes = collect(deps)
+
+    await signIn(routes)
+
+    expect(deps.authorizationUrl.mock.calls[0][0]).toMatchObject({ prompt: 'consent' })
   })
 
   it('completes the callback, stores the token and issues a session', async () => {
