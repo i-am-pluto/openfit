@@ -8,6 +8,7 @@ import type {
   RawFitbitPayload,
   RawHealthArchive,
   SessionBridge,
+  UserPreferences,
   UserProfile,
 } from '@/types'
 
@@ -154,6 +155,16 @@ export const fitbit: FitbitBridge = {
 export const profile = {
   get: () => request<UserProfile>('/api/profile'),
   save: (patch: Partial<UserProfile>) => request<UserProfile>('/api/profile', 'POST', patch),
+}
+
+/**
+ * How this account likes its dashboard. Server-side for the same reason the
+ * profile is: preferences follow the account to whatever browser it signs in
+ * from, and localStorage cannot do that.
+ */
+export const preferences = {
+  get: () => request<UserPreferences>('/api/preferences'),
+  save: (patch: Partial<UserPreferences>) => request<UserPreferences>('/api/preferences', 'POST', patch),
 }
 
 /**

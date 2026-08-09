@@ -23,6 +23,12 @@ export interface UserProfile {
   userEdited: string[]
 }
 
+/** Per-account UI preferences. Held server-side beside the profile. */
+export interface UserPreferences {
+  /** Chart ids the user has starred, as kebab-case slugs. */
+  favouriteCharts: string[]
+}
+
 export interface TimePoint {
   time: string
   value: number

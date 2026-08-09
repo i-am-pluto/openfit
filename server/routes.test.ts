@@ -13,6 +13,9 @@ const { createSessions } = require('./session.cjs') as { createSessions: (option
 const { createUserProfileStore } = require('../core/user-profile.cjs') as {
   createUserProfileStore: (options: any) => any
 }
+const { createPreferencesStore } = require('../core/preferences.cjs') as {
+  createPreferencesStore: (options: any) => any
+}
 
 const MASTER_KEY = Buffer.alloc(32, 11)
 const LETTERS = ['a', 'b', 'c', 'd']
@@ -39,9 +42,25 @@ function memoryProfileStore() {
   })
 }
 
+// Same reasoning as the profile stub: the real store over in-memory secrets, so
+// a POST of a hostile chart id is rejected by the code the server actually runs.
+function memoryPreferencesStore() {
+  const files = new Map<string, any>()
+  return createPreferencesStore({
+    secrets: {
+      read: (file: string, fallback: any) => (files.has(file) ? files.get(file) : fallback),
+      write: (file: string, value: any) => { files.set(file, value) },
+      remove: (file: string) => { files.delete(file) },
+      describe: () => ({ encrypted: true, backend: 'test' }),
+    },
+    preferencesFile: '/mock/preferences.secure.json',
+  })
+}
+
 function stubApp(overrides: Record<string, any> = {}) {
   const events = new EventEmitter()
   const profile = memoryProfileStore()
+  const preferences = memoryPreferencesStore()
   return {
     events,
     dataDir: '/mock',
@@ -54,6 +73,8 @@ function stubApp(overrides: Record<string, any> = {}) {
     exportArchive: vi.fn(() => ({ filename: 'openfit-archive-2026-08-09.json', json: '{"days":{}}' })),
     getProfile: vi.fn(() => profile.read()),
     saveProfile: vi.fn((patch: any) => profile.save(patch, { source: 'user' })),
+    getPreferences: vi.fn(() => preferences.read()),
+    savePreferences: vi.fn((patch: any) => preferences.save(patch)),
     assistant: {
       listAgents: vi.fn(() => [{ id: 'codex', label: 'Codex', available: true, selected: true }]),
       getStatus: vi.fn(() => ({ id: 'codex', label: 'Codex', available: true, authenticated: true })),
@@ -248,6 +269,55 @@ describe('server routes', () => {
     const { call } = await withServer(stubApp())
 
     expect(await (await call('/api/profile')).json()).toMatchObject({ birthYear: null, heightCm: null })
+  })
+
+  it('round-trips the chart favourites', async () => {
+    const { call } = await withServer(stubApp())
+
+    const saved = await (await call('/api/preferences', {
+      method: 'POST',
+      body: JSON.stringify({ favouriteCharts: ['steps-trend', 'sleep-stages'] }),
+    })).json()
+    expect(saved).toEqual({ favouriteCharts: ['sleep-stages', 'steps-trend'] })
+
+    expect(await (await call('/api/preferences')).json()).toEqual({
+      favouriteCharts: ['sleep-stages', 'steps-trend'],
+    })
+  })
+
+  it('returns empty preferences before anything is saved', async () => {
+    const { call } = await withServer(stubApp())
+    expect(await (await call('/api/preferences')).json()).toEqual({ favouriteCharts: [] })
+  })
+
+  it('drops a hostile chart id on the way through the route', async () => {
+    const { call } = await withServer(stubApp())
+
+    const saved = await (await call('/api/preferences', {
+      method: 'POST',
+      body: JSON.stringify({ favouriteCharts: ['../../etc/passwd', 'Steps Trend', 'steps-trend'] }),
+    })).json()
+
+    expect(saved).toEqual({ favouriteCharts: ['steps-trend'] })
+  })
+
+  it('merges a preferences patch that names nothing', async () => {
+    const { call } = await withServer(stubApp())
+
+    await call('/api/preferences', { method: 'POST', body: JSON.stringify({ favouriteCharts: ['steps-trend'] }) })
+    await call('/api/preferences', { method: 'POST', body: '{}' })
+
+    expect(await (await call('/api/preferences')).json()).toEqual({ favouriteCharts: ['steps-trend'] })
+  })
+
+  it('rejects a non-object preferences body', async () => {
+    const app = stubApp()
+    const { call } = await withServer(app)
+
+    const response = await call('/api/preferences', { method: 'POST', body: JSON.stringify(['not', 'an', 'object']) })
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ error: 'The preferences update must be an object.' })
+    expect(app.savePreferences).not.toHaveBeenCalled()
   })
 
   it('routes assistant calls, including agent selection', async () => {

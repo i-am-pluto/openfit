@@ -8,6 +8,7 @@ const { createAgentRegistry } = require('./agents/index.cjs')
 const { createCredentialStore } = require('./credentials.cjs')
 const { createSecretStore } = require('./secrets.cjs')
 const { createUserProfileStore } = require('./user-profile.cjs')
+const { createPreferencesStore } = require('./preferences.cjs')
 const { createSyncer, localIsoDate, validSyncDate } = require('./sync.cjs')
 const { MAX_MESSAGE_CHARS, MAX_HEALTH_CONTEXT_CHARS, sanitizeMessage } = require('./agents/agent-common.cjs')
 
@@ -58,6 +59,11 @@ function createApp(options = {}) {
   const userProfile = createUserProfileStore({
     secrets,
     profileFile: path.join(dataDir, 'user-profile.secure.json'),
+  })
+
+  const preferences = createPreferencesStore({
+    secrets,
+    preferencesFile: path.join(dataDir, 'preferences.secure.json'),
   })
 
   const agents = createAgentRegistry({
@@ -274,6 +280,9 @@ function createApp(options = {}) {
 
     getProfile: () => userProfile.read(),
     saveProfile: (patch) => userProfile.save(patch, { source: 'user' }),
+
+    getPreferences: () => preferences.read(),
+    savePreferences: (patch) => preferences.save(patch),
 
     exportArchive() {
       const archive = healthCache.normalizeArchive(credentials.readCache())

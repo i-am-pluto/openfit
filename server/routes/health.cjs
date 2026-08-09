@@ -28,6 +28,17 @@ function register({ add }) {
     return app.saveProfile(body)
   })
 
+  add('GET', '/api/preferences', (request, response, { app }) => app.getPreferences())
+
+  // The body is a partial preferences object, validated in the store for the
+  // same reason as the profile: one copy of the rules, next to the disk write.
+  add('POST', '/api/preferences', (request, response, { app, body }) => {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      throw new Error('The preferences update must be an object.')
+    }
+    return app.savePreferences(body)
+  })
+
   add('GET', '/api/export', (request, response, { app }) => {
     const archive = app.exportArchive()
     const body = Buffer.from(archive.json, 'utf8')
