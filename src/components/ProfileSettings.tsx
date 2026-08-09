@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { LoaderCircle } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -90,7 +90,13 @@ const ORIGIN_LABEL: Record<'provider' | 'user', string> = {
   user: 'Entered by you',
 }
 
-export function ProfileSettings() {
+/**
+ * `onChange` reports what the store actually holds after a load or a save, so
+ * the panels a profile field unlocks appear without a reload. It is the stored
+ * profile that travels, never the draft: a value the store rejected must not
+ * light up a chart.
+ */
+export function ProfileSettings({ onChange }: { onChange?: (profile: UserProfile) => void } = {}) {
   const uid = useId()
   const [stored, setStored] = useState<UserProfile>(EMPTY_USER_PROFILE)
   const [draft, setDraft] = useState<Draft>(() => toDraft(EMPTY_USER_PROFILE))
@@ -98,6 +104,9 @@ export function ProfileSettings() {
   const [reachable, setReachable] = useState(true)
   const [savingField, setSavingField] = useState<ProfileField | null>(null)
   const [failure, setFailure] = useState<{ field: ProfileField; message: string } | null>(null)
+  // Held in a ref so a caller passing an inline callback cannot re-run the load.
+  const onChangeRef = useRef(onChange)
+  useEffect(() => { onChangeRef.current = onChange }, [onChange])
 
   useEffect(() => {
     let cancelled = false
@@ -108,6 +117,7 @@ export function ProfileSettings() {
         setStored(next)
         setDraft(toDraft(next))
         setReachable(true)
+        onChangeRef.current?.(next)
       })
       .catch(() => {
         // The demo path has no server behind it. Fall back to the all-null
@@ -150,6 +160,7 @@ export function ProfileSettings() {
       try {
         const saved = await profileApi.save({ [field]: next } as Partial<UserProfile>)
         setStored(saved)
+        onChangeRef.current?.(saved)
         // Show what the store actually kept, not what was typed at it.
         setDraft(toDraft(saved))
         setFailure((previous) => (previous?.field === field ? null : previous))

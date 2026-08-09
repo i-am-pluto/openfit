@@ -202,7 +202,7 @@ function anomaliesFor(trends: TrendPoint[]) {
  * prefers. Same precedence as the archive itself, so the load series covers
  * exactly the days the assistant can see.
  */
-function loadDaysFor(current: DashboardData, archiveDays: DashboardData[]): LoadDay[] {
+export function loadDaysFor(current: DashboardData, archiveDays: DashboardData[]): LoadDay[] {
   const byDate = new Map<string, LoadDay>()
   const activitiesOn = (activities: ActivityItem[], date: string) =>
     activities.filter((activity) => activity.date === date)

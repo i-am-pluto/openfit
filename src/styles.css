@@ -3288,3 +3288,252 @@ input:focus-visible,
 @media (max-width: 720px) {
   .profile-fields { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* ---------------------------------------------------------------------------
+   Analysis panels wired into the views (Views.tsx).
+
+   Every block here belongs to a panel that carries its own sample count or
+   window in visible text, so the type has to stay legible next to the chart
+   rather than shrinking out of the way.
+   --------------------------------------------------------------------------- */
+
+/* The insight feed on Today. Sits under Overview, which is the position
+   HOME_DASHBOARD_MODEL.md assigns to "what is different from my baseline". */
+.home-section-copy {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.insight-feed {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(288px, 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+
+/* Overrides the older single-line insight card: this one stacks a heading, a
+   body, its evidence, and its actions, so it cannot be a row. */
+.insight-card {
+  min-height: 0;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 11px;
+}
+
+.insight-card-head { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
+
+.insight-card-head h3 {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 590;
+  line-height: 1.35;
+}
+
+/* Severity is spelled out as well as colored — color is never the only carrier
+   of the distinction. */
+.insight-severity {
+  align-self: flex-start;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 590;
+  letter-spacing: 0.04em;
+  line-height: 1.6;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.insight-severity.is-attention {
+  color: var(--color-crimson);
+  border-color: color-mix(in srgb, var(--color-crimson) 42%, transparent);
+  background: color-mix(in srgb, var(--color-crimson) 9%, transparent);
+}
+
+.insight-severity.is-notable {
+  color: var(--color-amber);
+  border-color: color-mix(in srgb, var(--color-amber) 42%, transparent);
+  background: color-mix(in srgb, var(--color-amber) 9%, transparent);
+}
+
+.insight-card .insight-body {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+/* The evidence row is the part that makes the claim checkable, so it is set as
+   a labelled list rather than a footnote. */
+.insight-evidence {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 8px 14px;
+  margin: 0;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--border);
+}
+
+.insight-evidence > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+
+.insight-evidence dt {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 590;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.insight-evidence dd {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 13px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.insight-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; }
+
+.insight-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  color: var(--muted-foreground);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 510;
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+
+.insight-action svg { width: 13px; height: 13px; }
+.insight-action:hover { color: var(--foreground); border-color: var(--ring); background: var(--accent); }
+.insight-action:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+.insight-action.is-primary {
+  color: var(--foreground);
+  border-color: color-mix(in srgb, var(--color-indigo) 38%, transparent);
+  background: color-mix(in srgb, var(--color-indigo) 12%, transparent);
+}
+
+.insight-action.is-primary:hover { background: color-mix(in srgb, var(--color-indigo) 20%, transparent); }
+
+/* Cardio load, composition, and the analysis grids. The ACWR readout under the
+   load chart is a KPI strip, never a badge on the chart itself. */
+.chart-kpi {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 26px;
+  padding-top: 11px;
+  border-top: 1px solid var(--border);
+}
+
+.chart-kpi .tiny-stat span { font-size: 12px; }
+
+.activity-analysis-grid,
+.health-analysis-grid,
+.sleep-analysis-grid { align-items: start; }
+
+/* One workout's zone stack, on its own row under the detail line. */
+.activity-zone-chart { grid-column: 2 / -1; min-width: 0; padding-top: 10px; }
+
+/* Karvonen zone shares beside the heart-rate histogram. */
+.zone-share-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  gap: 10px 18px;
+  padding-top: 11px;
+  border-top: 1px solid var(--border);
+}
+
+.zone-share-row .tiny-stat span { font-size: 12px; line-height: 1.35; }
+.zone-share-row .tiny-stat strong { display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; }
+
+/* The four recovery signals, side by side and never summed. */
+.recovery-signal-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(184px, 1fr));
+  gap: 12px 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.recovery-signal { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+
+.recovery-signal > span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 590;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.recovery-signal > strong {
+  color: var(--foreground);
+  font-size: 15px;
+  font-weight: 590;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.recovery-signal > small { color: var(--muted-foreground); font-size: 12px; line-height: 1.4; }
+
+/* Per-source sync failures and the profile prompt on the Data view. Both are
+   lists of named things the user can act on, not a count. */
+.sync-error-list,
+.profile-prompt-list {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--border);
+  list-style: none;
+}
+
+.sync-error-list li,
+.profile-prompt-list li {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.4fr) minmax(0, 1fr);
+  gap: 4px 16px;
+  align-items: baseline;
+  padding: 10px 14px;
+  background: var(--card);
+}
+
+.sync-error-list strong,
+.profile-prompt-list strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 590;
+}
+
+.sync-error-list strong { font-family: var(--font-mono); font-weight: 450; }
+
+.sync-error-list span,
+.profile-prompt-list span {
+  min-width: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+@media (max-width: 720px) {
+  .insight-feed { grid-template-columns: 1fr; }
+  .insight-evidence { grid-template-columns: 1fr; }
+  .chart-kpi { gap: 10px 18px; }
+  .activity-zone-chart { grid-column: 1 / -1; }
+  .sync-error-list li,
+  .profile-prompt-list li { grid-template-columns: 1fr; }
+}

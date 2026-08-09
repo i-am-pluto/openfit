@@ -27,16 +27,19 @@ import {
   useSidebar,
 } from '@/components/ui/sidebar'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import type { DashboardData, FitbitAuthStatus, PageId } from '@/types'
+import type { DashboardData, FitbitAuthStatus, PageId, RawHealthArchive, UserProfile } from '@/types'
 import { createDemoData, localIso } from '@/data/demo'
-import { fitbit, session } from '@/lib/api'
+import { fitbit, profile as profileApi, session } from '@/lib/api'
 import { normalizeFitbitData } from '@/data/normalize'
 import { formatDate, relativeTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { ActivityView, BodyView, DevicesView, HealthView, SleepView, TodayView } from '@/components/Views'
 import { HealthAssistant } from '@/components/HealthAssistant'
 import { ProfileSettings } from '@/components/ProfileSettings'
-import type { AssistantNavigation } from '@/lib/health-assistant'
+import { loadDaysFor, type AssistantNavigation } from '@/lib/health-assistant'
+import { dailyCardioLoad, workloadRatio } from '@/lib/cardio-load'
+import { buildInsights } from '@/lib/insight-engine'
+import { EMPTY_USER_PROFILE } from '@/lib/user-profile'
 import type { AppIcon } from '@/components/icons'
 import {
   ActivityIcon,
@@ -103,6 +106,19 @@ function shiftDate(value: string, days: number) {
   return localIso(new Date(year, month - 1, day + days, 12))
 }
 
+/**
+ * The cached archive's days as dashboards, ascending.
+ *
+ * Cardio load prefers per-workout heart zones, and only a full day payload
+ * carries them; the visible trend row has Active Zone Minutes and nothing finer.
+ */
+function archiveDashboards(archive: RawHealthArchive | null | undefined): DashboardData[] {
+  if (!archive) return []
+  return Object.values(archive.days)
+    .map((payload) => normalizeFitbitData(payload))
+    .sort((left, right) => left.selectedDate.localeCompare(right.selectedDate))
+}
+
 function IconButton({ label, children, ...props }: { label: string; children: ReactNode } & React.ComponentProps<typeof Button>) {
   return (
     <Tooltip>
@@ -125,6 +141,9 @@ export default function App() {
   const [signingOut, setSigningOut] = useState(false)
   const [syncProgress, setSyncProgress] = useState<SyncProgressState | null>(null)
   const [toast, setToast] = useState<ToastState | null>(null)
+  const [profile, setProfile] = useState<UserProfile>(EMPTY_USER_PROFILE)
+  const [archive, setArchive] = useState<DashboardData[]>([])
+  const [assistantSeed, setAssistantSeed] = useState<string | null>(null)
   const selectedDateRef = useRef(selectedDate)
   const dataDateRef = useRef(data.selectedDate)
   const syncingRef = useRef(false)
@@ -142,6 +161,30 @@ export default function App() {
   useEffect(() => {
     dataDateRef.current = data.selectedDate
   }, [data.selectedDate])
+
+  // One read at startup. A rejection is the demo path or an unreachable API,
+  // and both fall back to the all-null profile rather than blanking the app —
+  // every consumer of `UserProfile` already handles a null in every field.
+  useEffect(() => {
+    let cancelled = false
+    void profileApi
+      .get()
+      .then((next) => { if (!cancelled) setProfile(next) })
+      .catch(() => { if (!cancelled) setProfile(EMPTY_USER_PROFILE) })
+    return () => { cancelled = true }
+  }, [])
+
+  // The archive only changes when a sync writes to it, so it is read on mount
+  // and after a sync rather than on every date change. Without it the cardio
+  // load series falls back to the trend row's Active Zone Minutes, which is
+  // coarser but still labelled as such by `dailyCardioLoad`.
+  const loadArchive = useCallback(async () => {
+    try {
+      setArchive(archiveDashboards(await fitbit.getCachedArchive()))
+    } catch {
+      setArchive([])
+    }
+  }, [])
 
   const loadNativeState = useCallback(async () => {
     try {
@@ -196,6 +239,7 @@ export default function App() {
           }
 
           void fitbit.getStatus().then(setStatus).catch(() => undefined)
+          void loadArchive()
         } catch (error) {
           const queuedDate = queuedDateRef.current
           const failedDateIsStillSelected = selectedDateRef.current === date
@@ -220,10 +264,11 @@ export default function App() {
       setSyncTargetDate(null)
       setSyncProgress(null)
     }
-  }, [])
+  }, [loadArchive])
 
   useEffect(() => {
     void loadNativeState()
+    void loadArchive()
     const unsubscribeAuth = fitbit.onAuthComplete(async (result) => {
       setConnecting(false)
       if (!result.ok) {
@@ -247,7 +292,7 @@ export default function App() {
       unsubscribeAuth()
       unsubscribeSync()
     }
-  }, [loadNativeState, runSync])
+  }, [loadArchive, loadNativeState, runSync])
 
   useEffect(() => {
     if (!toast) return
@@ -320,6 +365,7 @@ export default function App() {
     try {
       setStatus(await fitbit.disconnect())
       setData(createDemoData(selectedDate))
+      setArchive([])
       setSettingsOpen(false)
       setPage('today')
       setToast({ tone: 'success', message: 'Account disconnected and local data removed.' })
@@ -341,15 +387,43 @@ export default function App() {
     }
   }
 
+  // Opens the assistant with the question already written, unsent. The insight
+  // that raised it names its own metric, numbers, and window, and the user has
+  // to be able to read and edit that before it goes anywhere.
+  const askAssistant = useCallback((prompt: string) => {
+    setAssistantSeed(prompt)
+    setAssistantOpen(true)
+  }, [])
+
+  // Computed once for the whole app. Today, Activity, and Health all read it,
+  // and recomputing inside each view would triple the work on every navigation.
+  const analysis = useMemo(() => {
+    const loads = dailyCardioLoad(loadDaysFor(data, archive))
+    return {
+      loads,
+      workload: workloadRatio(loads, data.selectedDate),
+      insights: buildInsights(data, profile, { loads }),
+    }
+  }, [archive, data, profile])
+
   const currentView = useMemo(() => {
-    const props = { data, status, navigate: setPage }
+    const props = {
+      data,
+      status,
+      navigate: setPage,
+      profile,
+      insights: analysis.insights,
+      loads: analysis.loads,
+      workload: analysis.workload,
+      onImprove: askAssistant,
+    }
     if (page === 'activity') return <ActivityView {...props} />
     if (page === 'health') return <HealthView {...props} />
     if (page === 'sleep') return <SleepView {...props} />
     if (page === 'body') return <BodyView {...props} />
     if (page === 'devices') return <DevicesView {...props} />
     return <TodayView {...props} />
-  }, [data, page, status])
+  }, [analysis, askAssistant, data, page, profile, status])
 
   const isToday = selectedDate === localIso()
   const sourceProviderLabel = status.provider === 'fitbit-legacy' ? 'Fitbit legacy' : 'Google Health'
@@ -497,6 +571,9 @@ export default function App() {
         open={assistantOpen}
         data={data}
         page={page}
+        profile={profile}
+        initialPrompt={assistantSeed}
+        onInitialPromptConsumed={() => setAssistantSeed(null)}
         onOpenChange={setAssistantOpen}
         onNavigate={navigateFromAssistant}
       />
@@ -511,6 +588,7 @@ export default function App() {
         onExport={exportData}
         onDisconnect={disconnect}
         onSignOut={signOut}
+        onProfileChange={setProfile}
       />
 
       {toast && (
@@ -663,6 +741,7 @@ function AccountDialog({
   onExport,
   onDisconnect,
   onSignOut,
+  onProfileChange,
 }: {
   open: boolean
   status: FitbitAuthStatus
@@ -673,6 +752,7 @@ function AccountDialog({
   onExport: () => Promise<void>
   onDisconnect: () => Promise<void>
   onSignOut: (everywhere: boolean) => Promise<void>
+  onProfileChange: (profile: UserProfile) => void
 }) {
   const providerLabel = status.provider === 'fitbit-legacy' ? 'Fitbit legacy' : 'Google Health'
   const busy = connecting || signingOut
@@ -722,7 +802,7 @@ function AccountDialog({
           </div>
         </div>
 
-        <ProfileSettings />
+        <ProfileSettings onChange={onProfileChange} />
       </DialogContent>
     </Dialog>
   )

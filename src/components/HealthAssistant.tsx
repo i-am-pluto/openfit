@@ -90,6 +90,8 @@ export function HealthAssistant({
   data,
   page,
   profile = EMPTY_USER_PROFILE,
+  initialPrompt = null,
+  onInitialPromptConsumed,
   onOpenChange,
   onNavigate,
 }: {
@@ -97,6 +99,9 @@ export function HealthAssistant({
   data: DashboardData
   page: PageId
   profile?: UserProfile
+  /** Seeds the composer. Never sent on the user's behalf. */
+  initialPrompt?: string | null
+  onInitialPromptConsumed?: () => void
   onOpenChange: (open: boolean) => void
   onNavigate: (navigation: AssistantNavigation) => void
 }) {
@@ -214,6 +219,15 @@ export function HealthAssistant({
 
   const runtime = useLocalRuntime(modelAdapter)
   const ready = Boolean(status.available && status.authenticated)
+
+  // The seeded question goes into the composer, not into the thread. An insight
+  // the user never asked about must not become a question they appear to have
+  // asked: they have to read it, edit it, and press send themselves.
+  useEffect(() => {
+    if (!open || !initialPrompt) return
+    runtime.thread.composer.setText(initialPrompt)
+    onInitialPromptConsumed?.()
+  }, [initialPrompt, onInitialPromptConsumed, open, runtime])
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
