@@ -29,7 +29,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { DashboardData, FitbitAuthStatus, PageId, RawHealthArchive, UserProfile } from '@/types'
 import { createDemoData, localIso } from '@/data/demo'
-import { fitbit, profile as profileApi, session } from '@/lib/api'
+import { fitbit, preferences as preferencesApi, profile as profileApi, session } from '@/lib/api'
 import { normalizeFitbitData } from '@/data/normalize'
 import { formatDate, relativeTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -89,6 +89,10 @@ const defaultStatus: FitbitAuthStatus = {
 // fault, and the way out is a fresh consent — the same Google sign-in.
 const RECONNECT_EXPLANATION = 'Google expires health access after about a week while the OAuth consent screen is in testing. Reconnect to grant it again; you stay signed in either way.'
 
+// A shared empty list so "no favourites yet" is one reference rather than a new
+// array on every render — `ViewProps.favourites` is read by every chart panel.
+const NO_FAVOURITES: string[] = []
+
 interface ToastState {
   tone: 'success' | 'error' | 'neutral'
   message: string
@@ -142,6 +146,7 @@ export default function App() {
   const [syncProgress, setSyncProgress] = useState<SyncProgressState | null>(null)
   const [toast, setToast] = useState<ToastState | null>(null)
   const [profile, setProfile] = useState<UserProfile>(EMPTY_USER_PROFILE)
+  const [favourites, setFavourites] = useState<string[]>(NO_FAVOURITES)
   const [archive, setArchive] = useState<DashboardData[]>([])
   const [assistantSeed, setAssistantSeed] = useState<string | null>(null)
   const selectedDateRef = useRef(selectedDate)
@@ -171,6 +176,18 @@ export default function App() {
       .get()
       .then((next) => { if (!cancelled) setProfile(next) })
       .catch(() => { if (!cancelled) setProfile(EMPTY_USER_PROFILE) })
+    return () => { cancelled = true }
+  }, [])
+
+  // Chart favourites, read once at startup on the same terms as the profile: a
+  // rejection is the demo path or an unreachable API, and both fall back to "no
+  // favourites" rather than blanking the app.
+  useEffect(() => {
+    let cancelled = false
+    void preferencesApi
+      .get()
+      .then((next) => { if (!cancelled) setFavourites(next.favouriteCharts ?? NO_FAVOURITES) })
+      .catch(() => { if (!cancelled) setFavourites(NO_FAVOURITES) })
     return () => { cancelled = true }
   }, [])
 
@@ -395,6 +412,21 @@ export default function App() {
     setAssistantOpen(true)
   }, [])
 
+  // The star moves first so pinning a panel is instant, but it is not allowed to
+  // keep claiming a save that failed: a rejection puts the list back exactly as
+  // it was, unless another toggle has already replaced it in the meantime.
+  const toggleFavourite = useCallback((chartId: string) => {
+    const previous = favourites
+    const next = previous.includes(chartId)
+      ? previous.filter((id) => id !== chartId)
+      : [...previous, chartId]
+    setFavourites(next)
+    void preferencesApi.save({ favouriteCharts: next }).catch((error: unknown) => {
+      setFavourites((live) => (live === next ? previous : live))
+      setToast({ tone: 'error', message: error instanceof Error ? error.message : 'That favourite could not be saved.' })
+    })
+  }, [favourites])
+
   // Computed once for the whole app. Today, Activity, and Health all read it,
   // and recomputing inside each view would triple the work on every navigation.
   const analysis = useMemo(() => {
@@ -416,6 +448,8 @@ export default function App() {
       loads: analysis.loads,
       workload: analysis.workload,
       onImprove: askAssistant,
+      favourites,
+      onToggleFavourite: toggleFavourite,
     }
     if (page === 'activity') return <ActivityView {...props} />
     if (page === 'health') return <HealthView {...props} />
@@ -423,7 +457,7 @@ export default function App() {
     if (page === 'body') return <BodyView {...props} />
     if (page === 'devices') return <DevicesView {...props} />
     return <TodayView {...props} />
-  }, [analysis, askAssistant, data, page, profile, status])
+  }, [analysis, askAssistant, data, favourites, page, profile, status, toggleFavourite])
 
   const isToday = selectedDate === localIso()
   const sourceProviderLabel = status.provider === 'fitbit-legacy' ? 'Fitbit legacy' : 'Google Health'

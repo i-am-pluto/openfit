@@ -3603,3 +3603,20 @@ input:focus-visible,
   border-top-left-radius: var(--radius-xl);
   pointer-events: none;
 }
+
+/* Ranked panels that share a flex or grid container with something that is not
+   a chart. `order` only sorts a container once every child has one, so a lone
+   ranked panel would otherwise jump past its unranked neighbours — the weight
+   card into the second column, the heart-rate card to the foot of the page.
+   Each of those neighbours takes `UNRANKED_PRIORITY` (999) from the chart
+   registry, which is the value the registry already gives anything it does not
+   rank: after every ranked panel, and still above a favourite's offset. Today's
+   arrangement is preserved, and a favourited chart still floats to the top. */
+.health-page > .health-grid,
+.health-page > section,
+.health-page > .empty-value,
+.health-page > .medical-note,
+.sleep-page > section,
+.sleep-page > .empty-value,
+.body-layout > .body-side-stack,
+.devices-page > .profile-prompt-panel { order: 999; }

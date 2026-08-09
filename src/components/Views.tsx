@@ -14,6 +14,7 @@ import {
   type StackedCategory,
 } from './AnalysisCharts'
 import { DuoIcon, EmptyValue, MetricTile, Panel, PanelHeader } from './Shared'
+import { ChartPanel } from './ChartPanel'
 import type { AppIcon } from './icons'
 import {
   ActiveIcon,
@@ -70,6 +71,9 @@ interface ViewProps {
   workload: WorkloadRatio | null
   /** Opens the assistant with a question already written, unsent. */
   onImprove: (prompt: string) => void
+  /** Chart ids this account has starred. A favourite sorts above its section. */
+  favourites: string[]
+  onToggleFavourite: (chartId: string) => void
 }
 
 const PAGE_LABEL: Record<PageId, string> = {
@@ -338,6 +342,7 @@ const trendColors: Record<HomeCategory, string> = {
 }
 
 function MetricTrendPanel({
+  chartId,
   data,
   category,
   icon,
@@ -346,7 +351,12 @@ function MetricTrendPanel({
   formatter,
   target = null,
   note,
+  favourites,
+  onToggleFavourite,
+  onExplain,
 }: {
+  /** Registry id for this card. Every call site names its own. */
+  chartId: string
   data: DashboardData
   category: HomeCategory
   icon: AppIcon
@@ -356,18 +366,30 @@ function MetricTrendPanel({
   target?: number | null
   /** Where a derived series comes from. A derived number has to say so. */
   note?: string
+  favourites: string[]
+  onToggleFavourite: (chartId: string) => void
+  onExplain: (prompt: string) => void
 }) {
   const count = values.filter(hasValue).length
   if (count < 2) return null
   const latest = [...values].reverse().find(hasValue) ?? null
+  const eyebrow = `${count} days with data`
   return (
-    <Panel className="metric-trend-card" category={category}>
-      <PanelHeader
-        eyebrow={`${count} days with data`}
-        title={title}
-        icon={icon}
-        action={latest === null ? null : <Badge variant="secondary">{formatter(latest)}</Badge>}
-      />
+    <ChartPanel
+      chartId={chartId}
+      className="metric-trend-card"
+      category={category}
+      eyebrow={eyebrow}
+      title={title}
+      icon={icon}
+      action={latest === null ? null : <Badge variant="secondary">{formatter(latest)}</Badge>}
+      window={eyebrow}
+      readings={latest === null ? [] : [{ label: `Latest ${title.toLowerCase()}`, value: formatter(latest) }]}
+      note={note}
+      favourites={favourites}
+      onToggleFavourite={onToggleFavourite}
+      onExplain={onExplain}
+    >
       <LineChart
         values={values}
         labels={trendLabels(data)}
@@ -382,7 +404,7 @@ function MetricTrendPanel({
         ariaLabel={`${title} during the synced period`}
       />
       {note && <p className="chart-note">{note}</p>}
-    </Panel>
+    </ChartPanel>
   )
 }
 
@@ -732,7 +754,7 @@ export function TodayView({ data, navigate, insights, onImprove }: ViewProps) {
   )
 }
 
-export function ActivityView({ data, loads, workload }: ViewProps) {
+export function ActivityView({ data, loads, workload, onImprove, favourites, onToggleFavourite }: ViewProps) {
   const stepValues = data.trends.map((point) => point.steps)
   const validSteps = stepValues.filter(hasValue)
   const averageSteps = validSteps.length ? validSteps.reduce((sum, value) => sum + value, 0) / validSteps.length : null
@@ -765,11 +787,35 @@ export function ActivityView({ data, loads, workload }: ViewProps) {
 
   const weekdaySteps = weekdayProfile(data.trends, (point) => point.steps)
   const weekdayRecorded = weekdaySteps.reduce((sum, bucket) => sum + bucket.sampleCount, 0)
+  // The figures the heat map prints in its own cells. A weekday with no recorded
+  // day has no mean, so it is left out rather than sent through as a zero.
+  const weekdayReadings = weekdaySteps
+    .filter((bucket) => hasValue(bucket.mean))
+    .map((bucket) => ({
+      label: `${bucket.label} (${bucket.sampleCount})`,
+      value: formatNumber(Math.round(bucket.mean as number)),
+    }))
 
   const loadValues = loads.map((load) => load.trimp)
   const loadLabels = loads.map((load) => formatDate(load.date, { day: 'numeric', month: 'short' }))
   const loadFromWorkouts = loads.filter((load) => load.source === 'workout-zones').length
   const loadFromZoneMinutes = loads.length - loadFromWorkouts
+  // The two sentences under the cardio-load chart, lifted into variables so the
+  // assistant is handed exactly the text the panel prints rather than a copy of
+  // it that could drift.
+  const loadSourceNote = `${loadFromWorkouts} ${dayWord(loadFromWorkouts)} from per-workout heart zones${loadFromZoneMinutes > 0 ? `, ${loadFromZoneMinutes} from the coarser Active Zone Minutes total` : ''}. Days with neither are absent, not zero.`
+  const loadRatioCaveat = workload === null
+    ? 'Not enough recorded days in the 7- and 28-day windows for an acute:chronic ratio.'
+    : workload.sufficient
+      ? null
+      : `Chronic load needs ${workload.requiredChronicDays} recorded days inside the last 28; ${workload.chronicDays} recorded. No acute:chronic ratio until then.`
+  const loadReadings = workload === null ? [] : [
+    { label: `7-day mean · ${workload.acuteDays} ${dayWord(workload.acuteDays)} recorded`, value: `${formatNumber(Math.round(workload.acuteMean))} TRIMP` },
+    ...(workload.sufficient ? [
+      { label: `28-day mean · ${workload.chronicDays} ${dayWord(workload.chronicDays)} recorded`, value: `${formatNumber(Math.round(workload.chronicMean))} TRIMP` },
+      { label: 'Acute:chronic ratio', value: workload.ratio.toFixed(2) },
+    ] : []),
+  ]
   const supporting = [
     hasValue(data.activity.floors) ? { label: 'Floors', value: formatNumber(data.activity.floors), icon: FloorsIcon } : null,
     hasValue(data.activity.lightActiveMinutes) ? { label: 'Light activity', value: formatNumber(data.activity.lightActiveMinutes), unit: 'min', icon: ActivityIcon } : null,
@@ -778,6 +824,7 @@ export function ActivityView({ data, loads, workload }: ViewProps) {
     hasValue(data.activity.zoneMinutes) ? { label: 'Zone minutes', value: formatNumber(data.activity.zoneMinutes), unit: 'min', icon: GaugeIcon } : null,
     hasValue(data.activity.sedentaryMinutes) ? { label: 'Sedentary time', value: formatNumber(data.activity.sedentaryMinutes), unit: 'min', icon: DurationIcon } : null,
   ].filter((item): item is SupportingMetric => item !== null)
+  const trendPanelProps = { favourites, onToggleFavourite, onExplain: onImprove }
   const activityTrendValues = [
     data.trends.map((point) => point.calories),
     data.trends.map((point) => point.distanceKm),
@@ -800,8 +847,17 @@ export function ActivityView({ data, loads, workload }: ViewProps) {
 
       <div className="chart-grid activity-chart-grid">
         {data.activity.stepsIntraday.length > 0 && (
-          <Panel className="chart-panel" category="activity">
-            <PanelHeader eyebrow="Day" title="Steps per hour" icon={ActivityIcon} />
+          <ChartPanel
+            chartId="activity-steps-hourly"
+            category="activity"
+            eyebrow="Day"
+            title="Steps per hour"
+            icon={ActivityIcon}
+            window="Day"
+            favourites={favourites}
+            onToggleFavourite={onToggleFavourite}
+            onExplain={onImprove}
+          >
             <ColumnChart
               values={stepsByHour.values}
               labels={stepsByHour.labels}
@@ -809,12 +865,22 @@ export function ActivityView({ data, loads, workload }: ViewProps) {
               height={226}
               ariaLabel="Steps aggregated by hour"
             />
-          </Panel>
+          </ChartPanel>
         )}
 
         {caloriesHourCount > 0 && (
-          <Panel className="chart-panel" category="activity">
-            <PanelHeader eyebrow={`${caloriesHourCount} ${caloriesHourCount === 1 ? 'hour' : 'hours'} with data on this day`} title="Calories per hour" icon={CaloriesIcon} />
+          <ChartPanel
+            chartId="activity-calories-hourly"
+            category="activity"
+            eyebrow={`${caloriesHourCount} ${caloriesHourCount === 1 ? 'hour' : 'hours'} with data on this day`}
+            title="Calories per hour"
+            icon={CaloriesIcon}
+            window={`${caloriesHourCount} ${caloriesHourCount === 1 ? 'hour' : 'hours'} with data on this day`}
+            note="Hours the tracker did not report are gaps, not hours without burn."
+            favourites={favourites}
+            onToggleFavourite={onToggleFavourite}
+            onExplain={onImprove}
+          >
             <ColumnChart
               values={caloriesByHour.values}
               labels={caloriesByHour.labels}
@@ -825,19 +891,25 @@ export function ActivityView({ data, loads, workload }: ViewProps) {
               ariaLabel="Calories aggregated by hour"
             />
             <p className="chart-note">Hours the tracker did not report are gaps, not hours without burn.</p>
-          </Panel>
+          </ChartPanel>
         )}
 
         {validSteps.length > 1 && (
-          <Panel className="chart-panel" category="activity">
-            <PanelHeader
-              eyebrow={`${validSteps.length} days with data`}
-              title="Daily steps"
-              icon={TrendIcon}
-              action={averageSteps !== null ? <Badge variant="secondary">Average {formatNumber(averageSteps)}</Badge> : null}
-            />
+          <ChartPanel
+            chartId="activity-steps-daily"
+            category="activity"
+            eyebrow={`${validSteps.length} days with data`}
+            title="Daily steps"
+            icon={TrendIcon}
+            action={averageSteps !== null ? <Badge variant="secondary">Average {formatNumber(averageSteps)}</Badge> : null}
+            window={`${validSteps.length} days with data`}
+            readings={averageSteps === null ? [] : [{ label: 'Average steps per recorded day', value: formatNumber(averageSteps) }]}
+            favourites={favourites}
+            onToggleFavourite={onToggleFavourite}
+            onExplain={onImprove}
+          >
             <ColumnChart values={stepValues} labels={trendLabels(data)} xValues={trendXValues(data)} target={data.activity.stepsGoal} height={226} ariaLabel="Total steps per day" />
-          </Panel>
+          </ChartPanel>
         )}
       </div>
 
@@ -846,13 +918,20 @@ export function ActivityView({ data, loads, workload }: ViewProps) {
           <SectionTitle title="Load and composition" copy={`Derived from the ${windowDays} ${dayWord(windowDays)} in view.`} />
           <div className="chart-grid activity-analysis-grid">
             {loads.length > 0 && (
-              <Panel className="chart-panel" category="activity">
-                <PanelHeader
-                  eyebrow={`${loads.length} ${dayWord(loads.length)} with recorded load`}
-                  title="Cardio load"
-                  icon={GaugeIcon}
-                  action={<Badge variant="secondary">Edwards TRIMP</Badge>}
-                />
+              <ChartPanel
+                chartId="activity-cardio-load"
+                category="activity"
+                eyebrow={`${loads.length} ${dayWord(loads.length)} with recorded load`}
+                title="Cardio load"
+                icon={GaugeIcon}
+                action={<Badge variant="secondary">Edwards TRIMP</Badge>}
+                window={`${loads.length} ${dayWord(loads.length)} with recorded load`}
+                readings={loadReadings}
+                note={[loadRatioCaveat, loadSourceNote].filter(Boolean).join(' ')}
+                favourites={favourites}
+                onToggleFavourite={onToggleFavourite}
+                onExplain={onImprove}
+              >
                 <ColumnChart
                   values={loadValues}
                   labels={loadLabels}
@@ -869,27 +948,24 @@ export function ActivityView({ data, loads, workload }: ViewProps) {
                 {/* The day count replaces the ratio here, never sits beside it: a
                     ratio against a half-filled chronic window reads every ordinary
                     week as a spike. */}
-                {workload && !workload.sufficient && (
-                  <p className="chart-note is-strong">
-                    Chronic load needs {workload.requiredChronicDays} recorded days inside the last 28; {workload.chronicDays} recorded. No acute:chronic ratio until then.
-                  </p>
-                )}
-                {workload === null && (
-                  <p className="chart-note is-strong">Not enough recorded days in the 7- and 28-day windows for an acute:chronic ratio.</p>
-                )}
-                <p className="chart-note">
-                  {loadFromWorkouts} {dayWord(loadFromWorkouts)} from per-workout heart zones{loadFromZoneMinutes > 0 ? `, ${loadFromZoneMinutes} from the coarser Active Zone Minutes total` : ''}. Days with neither are absent, not zero.
-                </p>
-              </Panel>
+                {loadRatioCaveat && <p className="chart-note is-strong">{loadRatioCaveat}</p>}
+                <p className="chart-note">{loadSourceNote}</p>
+              </ChartPanel>
             )}
 
             {intensityDayCount > 0 && (
-              <Panel className="chart-panel" category="activity">
-                <PanelHeader
-                  eyebrow={`${intensityDayCount} of ${windowDays} ${dayWord(windowDays)} with monitored workouts`}
-                  title="Workout intensity composition"
-                  icon={ActiveIcon}
-                />
+              <ChartPanel
+                chartId="activity-intensity-composition"
+                category="activity"
+                eyebrow={`${intensityDayCount} of ${windowDays} ${dayWord(windowDays)} with monitored workouts`}
+                title="Workout intensity composition"
+                icon={ActiveIcon}
+                window={`${intensityDayCount} of ${windowDays} ${dayWord(windowDays)} with monitored workouts`}
+                note="Minutes in each heart-rate zone, summed across the workouts recorded on each day."
+                favourites={favourites}
+                onToggleFavourite={onToggleFavourite}
+                onExplain={onImprove}
+              >
                 <StackedBarChart
                   categories={intensityDays}
                   height={226}
@@ -897,16 +973,23 @@ export function ActivityView({ data, loads, workload }: ViewProps) {
                   ariaLabel="Heart-rate zone minutes per day"
                 />
                 <p className="chart-note">Minutes in each heart-rate zone, summed across the workouts recorded on each day.</p>
-              </Panel>
+              </ChartPanel>
             )}
 
             {weekdayRecorded > 0 && (
-              <Panel className="chart-panel" category="activity">
-                <PanelHeader
-                  eyebrow={`${weekdayRecorded} recorded ${dayWord(weekdayRecorded)} in view`}
-                  title="Steps by weekday"
-                  icon={StepsIcon}
-                />
+              <ChartPanel
+                chartId="activity-steps-weekday"
+                category="activity"
+                eyebrow={`${weekdayRecorded} recorded ${dayWord(weekdayRecorded)} in view`}
+                title="Steps by weekday"
+                icon={StepsIcon}
+                window={`${weekdayRecorded} recorded ${dayWord(weekdayRecorded)} in view`}
+                readings={weekdayReadings}
+                note="The bracketed figure is how many recorded days sit behind each mean. A weekday with none is shown as no data, not as zero."
+                favourites={favourites}
+                onToggleFavourite={onToggleFavourite}
+                onExplain={onImprove}
+              >
                 <HeatmapGrid
                   rows={['Mean steps']}
                   columns={weekdaySteps.map((bucket) => `${bucket.label} (${bucket.sampleCount})`)}
@@ -915,7 +998,7 @@ export function ActivityView({ data, loads, workload }: ViewProps) {
                   ariaLabel="Mean steps by weekday"
                 />
                 <p className="chart-note">The bracketed figure is how many recorded days sit behind each mean. A weekday with none is shown as no data, not as zero.</p>
-              </Panel>
+              </ChartPanel>
             )}
           </div>
         </section>
@@ -925,12 +1008,12 @@ export function ActivityView({ data, loads, workload }: ViewProps) {
         <section>
           <SectionTitle title="Activity trends" copy="Daily series returned by Google Health." />
           <div className="metric-trend-grid">
-            <MetricTrendPanel data={data} category="activity" icon={CaloriesIcon} title="Calories burned" values={data.trends.map((point) => point.calories)} formatter={(value) => `${formatNumber(value)} kcal`} />
-            <MetricTrendPanel data={data} category="activity" icon={DistanceIcon} title="Distance" values={data.trends.map((point) => point.distanceKm)} formatter={(value) => `${formatDecimal(value)} km`} />
-            <MetricTrendPanel data={data} category="activity" icon={ActiveIcon} title="Active minutes" values={data.trends.map((point) => point.activeMinutes)} formatter={(value) => `${formatNumber(value)} min`} />
-            <MetricTrendPanel data={data} category="activity" icon={GaugeIcon} title="Zone minutes" values={data.trends.map((point) => point.zoneMinutes)} formatter={(value) => `${formatNumber(value)} min`} />
-            <MetricTrendPanel data={data} category="activity" icon={DurationIcon} title="Sedentary time" values={data.trends.map((point) => point.sedentaryMinutes)} formatter={(value) => formatMinutes(value)} />
-            <MetricTrendPanel data={data} category="activity" icon={FloorsIcon} title="Floors" values={data.trends.map((point) => point.floors)} formatter={(value) => formatNumber(value)} />
+            <MetricTrendPanel {...trendPanelProps} chartId="activity-trend-calories" data={data} category="activity" icon={CaloriesIcon} title="Calories burned" values={data.trends.map((point) => point.calories)} formatter={(value) => `${formatNumber(value)} kcal`} />
+            <MetricTrendPanel {...trendPanelProps} chartId="activity-trend-distance" data={data} category="activity" icon={DistanceIcon} title="Distance" values={data.trends.map((point) => point.distanceKm)} formatter={(value) => `${formatDecimal(value)} km`} />
+            <MetricTrendPanel {...trendPanelProps} chartId="activity-trend-active-minutes" data={data} category="activity" icon={ActiveIcon} title="Active minutes" values={data.trends.map((point) => point.activeMinutes)} formatter={(value) => `${formatNumber(value)} min`} />
+            <MetricTrendPanel {...trendPanelProps} chartId="activity-trend-zone-minutes" data={data} category="activity" icon={GaugeIcon} title="Zone minutes" values={data.trends.map((point) => point.zoneMinutes)} formatter={(value) => `${formatNumber(value)} min`} />
+            <MetricTrendPanel {...trendPanelProps} chartId="activity-trend-sedentary" data={data} category="activity" icon={DurationIcon} title="Sedentary time" values={data.trends.map((point) => point.sedentaryMinutes)} formatter={(value) => formatMinutes(value)} />
+            <MetricTrendPanel {...trendPanelProps} chartId="activity-trend-floors" data={data} category="activity" icon={FloorsIcon} title="Floors" values={data.trends.map((point) => point.floors)} formatter={(value) => formatNumber(value)} />
           </div>
         </section>
       )}
@@ -948,7 +1031,9 @@ export function ActivityView({ data, loads, workload }: ViewProps) {
   )
 }
 
-export function HealthView({ data, profile }: ViewProps) {
+export function HealthView({ data, profile, onImprove, favourites, onToggleFavourite }: ViewProps) {
+  // Every chart panel on this view is wired to the same three handlers.
+  const chartProps = { favourites, onToggleFavourite, onExplain: onImprove }
   const heartValues = data.health.heartRateIntraday.map((point) => point.value)
   const heartLabels = data.health.heartRateIntraday.map((point) => point.time)
   const restingValues = data.trends.map((point) => point.restingHeartRate)
@@ -1007,6 +1092,10 @@ export function HealthView({ data, profile }: ViewProps) {
     : skinWindowStats
       ? { mean: skinWindowStats.mean, stdDev: skinWindowStats.stdDev }
       : undefined
+  const spo2BandNote = `Band is the mean ±1 standard deviation across the ${spo2Count} recorded ${spo2Count === 1 ? 'night' : 'nights'}. Low–high whiskers exist only for ${data.selectedDate}, the one night the provider sends a range for.`
+  const skinBandNote = `The series is already a deviation from your own baseline, so zero is that baseline.${hasValue(providerSigma)
+    ? ` The band is your provider's 30-day standard deviation, ±${formatDecimal(providerSigma, 2)} °C.`
+    : ` No 30-day standard deviation was sent, so the band is the spread of these ${skinCount} nights instead.`}`
   const skinPoints: RangePoint[] = data.trends.map((point) => ({
     label: formatDate(point.date, { day: 'numeric', month: 'short' }),
     value: point.skinTemperature,
@@ -1028,11 +1117,31 @@ export function HealthView({ data, profile }: ViewProps) {
   const recoveryBaselineDays = Math.max(...recovery.map((signal) => signal.sampleCount))
   const hasRecoveryDeviation = recovery.some((signal) => signal.z !== null)
 
+  // The sentences the distribution panel prints under its chart, kept in one
+  // place so the assistant is handed the same words the user is reading.
+  const heartBandNote = "Bands are in bpm; the height is how many of the day's readings fell in each."
+  const restingBinNote = restingBin
+    ? `Your resting heart rate of ${formatNumber(data.health.restingHeartRate)} bpm falls in the ${restingBin.label} bpm band.`
+    : null
+
   return (
     <div className="page-stack health-page">
       {hasHeartSummary && (
-        <Panel className="heart-detail-card" category="heart">
-          <PanelHeader eyebrow="Day" title="Heart rate" icon={HeartIcon} />
+        <ChartPanel
+          chartId="health-heart-rate-day"
+          className="heart-detail-card"
+          category="heart"
+          eyebrow="Day"
+          title="Heart rate"
+          icon={HeartIcon}
+          window="Day"
+          readings={[
+            ...(hasValue(data.health.currentHeartRate) ? [{ label: 'Recent', value: `${formatNumber(data.health.currentHeartRate)} bpm` }] : []),
+            ...(hasValue(data.health.restingHeartRate) ? [{ label: 'At rest', value: `${formatNumber(data.health.restingHeartRate)} bpm` }] : []),
+            ...(hasValue(data.health.heartRateMin) ? [{ label: 'Range', value: `${formatNumber(data.health.heartRateMin)}–${formatNumber(data.health.heartRateMax)} bpm` }] : []),
+          ]}
+          {...chartProps}
+        >
           <div className="heart-kpis">
             {hasValue(data.health.currentHeartRate) && <div className="primary-kpi"><strong>{formatNumber(data.health.currentHeartRate)}</strong><span>recent bpm</span></div>}
             {hasValue(data.health.restingHeartRate) && <TinyStat label="At rest" value={formatNumber(data.health.restingHeartRate)} unit=" bpm" />}
@@ -1051,7 +1160,7 @@ export function HealthView({ data, profile }: ViewProps) {
               ariaLabel="Heart rate throughout the day"
             />
           )}
-        </Panel>
+        </ChartPanel>
       )}
 
       <div className="health-grid">
@@ -1066,10 +1175,22 @@ export function HealthView({ data, profile }: ViewProps) {
 
         {restingCount > 1 && (
           <section>
-            <SectionTitle title="Resting heart rate" copy={`${restingCount} days with data`} />
-            <Panel className="chart-panel compact-chart-panel" category="heart">
+            {/* The panel header carries this section's title and count, so the
+                SectionTitle that used to sit here would now say it twice. */}
+            <ChartPanel
+              chartId="health-resting-hr"
+              className="compact-chart-panel"
+              category="heart"
+              eyebrow={`${restingCount} days with data`}
+              title="Resting heart rate"
+              window={`${restingCount} days with data`}
+              readings={hasValue(data.health.restingHeartRate)
+                ? [{ label: `Resting heart rate on ${data.selectedDate}`, value: `${formatNumber(data.health.restingHeartRate)} bpm` }]
+                : []}
+              {...chartProps}
+            >
               <LineChart values={restingValues} labels={trendLabels(data)} xValues={trendXValues(data)} color="var(--category-heart)" height={226} formatter={(value) => `${Math.round(value)} bpm`} ariaLabel="Resting heart rate trend" />
-            </Panel>
+            </ChartPanel>
           </section>
         )}
       </div>
@@ -1077,12 +1198,22 @@ export function HealthView({ data, profile }: ViewProps) {
       {heartBins.length > 0 && (
         <section>
           <SectionTitle title="Heart-rate distribution" copy={`Every reading recorded on ${data.selectedDate}, grouped by rate.`} />
-          <Panel className="chart-panel" category="heart">
-            <PanelHeader
-              eyebrow={`${formatNumber(heartValues.length)} readings on this day`}
-              title="Time spent at each rate"
-              icon={HeartIcon}
-            />
+          <ChartPanel
+            chartId="health-hr-distribution"
+            category="heart"
+            eyebrow={`${formatNumber(heartValues.length)} readings on this day`}
+            title="Time spent at each rate"
+            icon={HeartIcon}
+            window={`${formatNumber(heartValues.length)} readings on this day`}
+            readings={zoneShares && zones
+              ? zoneShares.map((share) => ({
+                label: `${share.label} · ${Math.round(zones.find((zone) => zone.key === share.key)?.min ?? 0)}–${Math.round(zones.find((zone) => zone.key === share.key)?.max ?? 0)} bpm`,
+                value: `${Math.round(share.share * 100)}% · ${formatNumber(share.count)} readings`,
+              }))
+              : []}
+            note={[heartBandNote, restingBinNote].filter(Boolean).join(' ')}
+            {...chartProps}
+          >
             <ColumnChart
               values={heartBins.map((bin) => bin.count)}
               labels={heartBins.map((bin) => bin.label)}
@@ -1091,12 +1222,8 @@ export function HealthView({ data, profile }: ViewProps) {
               formatter={(value) => `${formatNumber(value)} readings`}
               ariaLabel="Heart-rate readings by rate band"
             />
-            <p className="chart-note">Bands are in bpm; the height is how many of the day's readings fell in each.</p>
-            {restingBin && (
-              <p className="chart-note is-strong">
-                Your resting heart rate of {formatNumber(data.health.restingHeartRate)} bpm falls in the {restingBin.label} bpm band.
-              </p>
-            )}
+            <p className="chart-note">{heartBandNote}</p>
+            {restingBinNote && <p className="chart-note is-strong">{restingBinNote}</p>}
             {zoneShares && zones ? (
               <>
                 <div className="zone-share-row">
@@ -1118,7 +1245,7 @@ export function HealthView({ data, profile }: ViewProps) {
             ) : (
               <p className="chart-note">Add your year of birth or a measured maximum heart rate in Settings to see your own heart-rate zones here.</p>
             )}
-          </Panel>
+          </ChartPanel>
         </section>
       )}
 
@@ -1127,8 +1254,23 @@ export function HealthView({ data, profile }: ViewProps) {
           <SectionTitle title="Nightly ranges" copy={`Each night against your own spread across the ${data.trends.length} ${dayWord(data.trends.length)} in view.`} />
           <div className="chart-grid health-analysis-grid">
             {spo2Count > 1 && (
-              <Panel className="chart-panel" category="heart">
-                <PanelHeader eyebrow={`${spo2Count} ${spo2Count === 1 ? 'night' : 'nights'} with data`} title="Blood oxygen" icon={CloudIcon} />
+              <ChartPanel
+                chartId="health-spo2-band"
+                category="heart"
+                eyebrow={`${spo2Count} ${spo2Count === 1 ? 'night' : 'nights'} with data`}
+                title="Blood oxygen"
+                icon={CloudIcon}
+                window={`${spo2Count} ${spo2Count === 1 ? 'night' : 'nights'} with data`}
+                readings={[
+                  ...(spo2Band ? [{ label: 'Baseline ±1 SD', value: `${formatDecimal(spo2Band.mean)}%` }] : []),
+                  ...(hasValue(data.health.spo2) ? [{ label: `Average on ${data.selectedDate}`, value: `${formatDecimal(data.health.spo2)}%` }] : []),
+                  ...(hasValue(data.health.spo2Min) && hasValue(data.health.spo2Max)
+                    ? [{ label: `Low–high on ${data.selectedDate}`, value: `${formatDecimal(data.health.spo2Min)}–${formatDecimal(data.health.spo2Max)}%` }]
+                    : []),
+                ]}
+                note={spo2BandNote}
+                {...chartProps}
+              >
                 <RangeBandChart
                   points={spo2Points}
                   band={spo2Band ? { mean: spo2Band.mean, stdDev: spo2Band.stdDev } : undefined}
@@ -1136,15 +1278,25 @@ export function HealthView({ data, profile }: ViewProps) {
                   formatter={(value) => `${formatDecimal(value)}%`}
                   ariaLabel="Blood oxygen per night against its window mean"
                 />
-                <p className="chart-note">
-                  Band is the mean ±1 standard deviation across the {spo2Count} recorded {spo2Count === 1 ? 'night' : 'nights'}. Low–high whiskers exist only for {data.selectedDate}, the one night the provider sends a range for.
-                </p>
-              </Panel>
+                <p className="chart-note">{spo2BandNote}</p>
+              </ChartPanel>
             )}
 
             {skinCount > 1 && (
-              <Panel className="chart-panel" category="recovery">
-                <PanelHeader eyebrow={`${skinCount} ${skinCount === 1 ? 'night' : 'nights'} with data`} title="Skin temperature against baseline" icon={GaugeIcon} />
+              <ChartPanel
+                chartId="health-skin-temperature-band"
+                category="recovery"
+                eyebrow={`${skinCount} ${skinCount === 1 ? 'night' : 'nights'} with data`}
+                title="Skin temperature against baseline"
+                icon={GaugeIcon}
+                window={`${skinCount} ${skinCount === 1 ? 'night' : 'nights'} with data`}
+                readings={[
+                  ...(skinBand ? [{ label: 'Baseline ±1 SD', value: `${signedNumber(skinBand.mean, 2)} °C` }] : []),
+                  ...(hasValue(data.health.skinTemperature) ? [{ label: `Deviation on ${data.selectedDate}`, value: `${signedNumber(data.health.skinTemperature, 2)} °C` }] : []),
+                ]}
+                note={skinBandNote}
+                {...chartProps}
+              >
                 <RangeBandChart
                   points={skinPoints}
                   band={skinBand}
@@ -1152,13 +1304,8 @@ export function HealthView({ data, profile }: ViewProps) {
                   formatter={(value) => `${signedNumber(value, 2)} °C`}
                   ariaLabel="Skin temperature deviation per night"
                 />
-                <p className="chart-note">
-                  The series is already a deviation from your own baseline, so zero is that baseline.
-                  {hasValue(providerSigma)
-                    ? ` The band is your provider's 30-day standard deviation, ±${formatDecimal(providerSigma, 2)} °C.`
-                    : ` No 30-day standard deviation was sent, so the band is the spread of these ${skinCount} nights instead.`}
-                </p>
-              </Panel>
+                <p className="chart-note">{skinBandNote}</p>
+              </ChartPanel>
             )}
           </div>
         </section>
@@ -1167,8 +1314,18 @@ export function HealthView({ data, profile }: ViewProps) {
       {hrvScatter.length > 1 && (
         <section>
           <SectionTitle title="HRV against resting heart rate" copy="An association in your own data. The arithmetic cannot say which way any influence runs." />
-          <Panel className="chart-panel" category="heart">
-            <PanelHeader eyebrow={`${hrvScatter.length} paired ${dayWord(hrvScatter.length)}`} title="Paired nights" icon={SignalIcon} />
+          <ChartPanel
+            chartId="health-hrv-scatter"
+            category="heart"
+            eyebrow={`${hrvScatter.length} paired ${dayWord(hrvScatter.length)}`}
+            title="Paired nights"
+            icon={SignalIcon}
+            window={`${hrvScatter.length} paired ${dayWord(hrvScatter.length)}`}
+            readings={hrvCorrelation
+              ? [{ label: 'Correlation printed under the chart', value: `r = ${hrvCorrelation.r.toFixed(2)} over ${hrvCorrelation.sampleCount} paired readings` }]
+              : [{ label: 'Correlation printed under the chart', value: 'No correlation reported — too few paired readings, or no variation to correlate' }]}
+            {...chartProps}
+          >
             <ScatterChart
               points={hrvScatter}
               xLabel="HRV (ms)"
@@ -1179,19 +1336,28 @@ export function HealthView({ data, profile }: ViewProps) {
               formatY={(value) => `${formatNumber(Math.round(value))} bpm`}
               ariaLabel="HRV against resting heart rate, one point per night"
             />
-          </Panel>
+          </ChartPanel>
         </section>
       )}
 
       {hasRecoveryDeviation && (
         <section>
           <SectionTitle title="Recovery signals" copy="Four measurements, four baselines, four units. Nothing is combined." />
-          <Panel className="chart-panel recovery-panel" category="recovery">
-            <PanelHeader
-              eyebrow={`Baselines from up to ${recoveryBaselineDays} prior recorded ${dayWord(recoveryBaselineDays)}`}
-              title={`Each signal against its own baseline on ${data.selectedDate}`}
-              icon={SignalIcon}
-            />
+          <ChartPanel
+            chartId="health-recovery-panel"
+            className="recovery-panel"
+            category="recovery"
+            eyebrow={`Baselines from up to ${recoveryBaselineDays} prior recorded ${dayWord(recoveryBaselineDays)}`}
+            title={`Each signal against its own baseline on ${data.selectedDate}`}
+            icon={SignalIcon}
+            window={`Baselines from up to ${recoveryBaselineDays} prior recorded ${dayWord(recoveryBaselineDays)}`}
+            readings={recovery.map((signal) => ({
+              label: signal.label,
+              value: signal.current === null ? 'No reading' : `${formatDecimal(signal.current)} ${signal.unit}`,
+            }))}
+            note="These four are reported separately on purpose. Four signals agreeing is a different morning from two pointing each way, and there is no recovery score here that would render both as the same middling figure."
+            {...chartProps}
+          >
             <DivergingColumnChart
               values={recovery.map((signal) => signal.z)}
               labels={recovery.map((signal) => signal.label)}
@@ -1217,7 +1383,7 @@ export function HealthView({ data, profile }: ViewProps) {
             <p className="chart-note is-strong">
               These four are reported separately on purpose. Four signals agreeing is a different morning from two pointing each way, and there is no recovery score here that would render both as the same middling figure.
             </p>
-          </Panel>
+          </ChartPanel>
         </section>
       )}
 
@@ -1225,12 +1391,12 @@ export function HealthView({ data, profile }: ViewProps) {
         <section>
           <SectionTitle title="Physiological trends" copy="Compare measurements with your personal trends, not generic thresholds." />
           <div className="metric-trend-grid">
-            <MetricTrendPanel data={data} category="heart" icon={SignalIcon} title="HRV" values={data.trends.map((point) => point.hrvMs)} formatter={(value) => `${formatDecimal(value)} ms`} />
-            <MetricTrendPanel data={data} category="heart" icon={CloudIcon} title="Average SpO₂" values={data.trends.map((point) => point.spo2)} formatter={(value) => `${formatDecimal(value)}%`} />
-            <MetricTrendPanel data={data} category="heart" icon={BreathingIcon} title="Breathing rate" values={data.trends.map((point) => point.breathingRate)} formatter={(value) => `${formatDecimal(value)} rpm`} />
-            <MetricTrendPanel data={data} category="recovery" icon={GaugeIcon} title="Skin temperature" values={data.trends.map((point) => point.skinTemperature)} formatter={(value) => `${signedNumber(value, 1)} °C`} />
-            <MetricTrendPanel data={data} category="recovery" icon={GaugeIcon} title="Body temperature" values={data.trends.map((point) => point.coreTemperature)} formatter={(value) => `${formatDecimal(value)} °C`} />
-            <MetricTrendPanel data={data} category="heart" icon={GaugeIcon} title="Cardio fitness" values={data.trends.map((point) => point.cardioScore)} formatter={(value) => formatNumber(value)} />
+            <MetricTrendPanel {...chartProps} chartId="health-trend-hrv" data={data} category="heart" icon={SignalIcon} title="HRV" values={data.trends.map((point) => point.hrvMs)} formatter={(value) => `${formatDecimal(value)} ms`} />
+            <MetricTrendPanel {...chartProps} chartId="health-trend-spo2" data={data} category="heart" icon={CloudIcon} title="Average SpO₂" values={data.trends.map((point) => point.spo2)} formatter={(value) => `${formatDecimal(value)}%`} />
+            <MetricTrendPanel {...chartProps} chartId="health-trend-breathing" data={data} category="heart" icon={BreathingIcon} title="Breathing rate" values={data.trends.map((point) => point.breathingRate)} formatter={(value) => `${formatDecimal(value)} rpm`} />
+            <MetricTrendPanel {...chartProps} chartId="health-trend-skin-temperature" data={data} category="recovery" icon={GaugeIcon} title="Skin temperature" values={data.trends.map((point) => point.skinTemperature)} formatter={(value) => `${signedNumber(value, 1)} °C`} />
+            <MetricTrendPanel {...chartProps} chartId="health-trend-body-temperature" data={data} category="recovery" icon={GaugeIcon} title="Body temperature" values={data.trends.map((point) => point.coreTemperature)} formatter={(value) => `${formatDecimal(value)} °C`} />
+            <MetricTrendPanel {...chartProps} chartId="health-trend-cardio-fitness" data={data} category="heart" icon={GaugeIcon} title="Cardio fitness" values={data.trends.map((point) => point.cardioScore)} formatter={(value) => formatNumber(value)} />
           </div>
         </section>
       )}
@@ -1250,14 +1416,16 @@ export function HealthView({ data, profile }: ViewProps) {
   )
 }
 
+const STAGE_EPISODE_LABELS: Array<[keyof SleepStageCounts, string]> = [
+  ['deep', 'Deep episodes'],
+  ['light', 'Light episodes'],
+  ['rem', 'REM episodes'],
+  ['wake', 'Awake episodes'],
+]
+
 /** The four stage-episode counts. Absent is "not reported", never zero episodes. */
 function StageTransitions({ counts }: { counts: SleepStageCounts | null | undefined }) {
-  const entries = ([
-    ['deep', 'Deep episodes'],
-    ['light', 'Light episodes'],
-    ['rem', 'REM episodes'],
-    ['wake', 'Awake episodes'],
-  ] as Array<[keyof SleepStageCounts, string]>).filter(([key]) => hasValue(counts?.[key]))
+  const entries = STAGE_EPISODE_LABELS.filter(([key]) => hasValue(counts?.[key]))
   if (!entries.length) return null
   return (
     <>
@@ -1268,7 +1436,8 @@ function StageTransitions({ counts }: { counts: SleepStageCounts | null | undefi
   )
 }
 
-export function SleepView({ data }: ViewProps) {
+export function SleepView({ data, onImprove, favourites, onToggleFavourite }: ViewProps) {
+  const chartProps = { favourites, onToggleFavourite, onExplain: onImprove }
   const sleepValues = data.trends.map((point) => point.sleepMinutes)
   const sleepCount = sleepValues.filter(hasValue).length
   const efficiencyValues = data.trends.map((point) => point.sleepEfficiency)
@@ -1288,6 +1457,12 @@ export function SleepView({ data }: ViewProps) {
     }))
   const hasStageTransitions = (['deep', 'light', 'rem', 'wake'] as Array<keyof SleepStageCounts>)
     .some((key) => hasValue(stageTransitions?.[key]))
+  // The same four counts `StageTransitions` prints. A stage the device did not
+  // report has no count, so it is left out rather than sent through as zero.
+  const stageEpisodeReadings = STAGE_EPISODE_LABELS
+    .filter(([key]) => hasValue(stageTransitions?.[key]))
+    .map(([key, label]) => ({ label, value: formatNumber(stageTransitions?.[key] ?? null) }))
+  const stageEpisodeNote = `How many separate times each stage was entered on ${data.selectedDate}. A stage the device did not report is absent, not zero episodes.`
   return (
     <div className="page-stack sleep-page">
       {hasSummary && (
@@ -1328,22 +1503,45 @@ export function SleepView({ data }: ViewProps) {
           </Panel>
 
           {data.sleep.stages.some((stage) => stage.minutes > 0) && (
-            <Panel className="sleep-stage-card" category="sleep">
-              <PanelHeader eyebrow="Recorded period" title="Time by stage" icon={SignalIcon} />
+            <ChartPanel
+              chartId="sleep-stages"
+              className="sleep-stage-card"
+              category="sleep"
+              eyebrow="Recorded period"
+              title="Time by stage"
+              icon={SignalIcon}
+              window="Recorded period"
+              readings={data.sleep.stages.map((stage) => ({ label: stage.name, value: compactMinutes(stage.minutes) }))}
+              {...chartProps}
+            >
               <SleepStageBar stages={data.sleep.stages} />
               {data.sleep.totalMinutes !== null && data.sleep.goalMinutes !== null && (
                 <div className="compact-stats">
                   <TinyStat label="Difference from goal" value={formatMinutes(data.sleep.totalMinutes - data.sleep.goalMinutes)} />
                 </div>
               )}
-            </Panel>
+            </ChartPanel>
           )}
         </div>
       )}
 
       {stageTimeline.length > 0 && (
-        <Panel className="sleep-timeline-card" category="sleep">
-          <PanelHeader eyebrow={`${stageTimeline.length} segments detected`} title="Night timeline" icon={TrendIcon} />
+        <ChartPanel
+          chartId="sleep-timeline"
+          className="sleep-timeline-card"
+          category="sleep"
+          eyebrow={`${stageTimeline.length} segments detected`}
+          title="Night timeline"
+          icon={TrendIcon}
+          window={`${stageTimeline.length} segments detected`}
+          readings={[
+            ...(hasValue(data.sleep.timeInBed) ? [{ label: 'Time in bed', value: formatMinutes(data.sleep.timeInBed) }] : []),
+            ...(hasValue(data.sleep.minutesAwake) ? [{ label: 'Time awake', value: formatMinutes(data.sleep.minutesAwake) }] : []),
+            ...(hasValue(data.sleep.minutesToFallAsleep) ? [{ label: 'Time to fall asleep', value: formatMinutes(data.sleep.minutesToFallAsleep) }] : []),
+            ...(hasValue(data.sleep.minutesAfterWakeUp) ? [{ label: 'After waking', value: formatMinutes(data.sleep.minutesAfterWakeUp) }] : []),
+          ]}
+          {...chartProps}
+        >
           <SleepStageTimeline segments={stageTimeline} />
           <div className="sleep-detail-stats">
             {hasValue(data.sleep.timeInBed) && <TinyStat label="Time in bed" value={formatMinutes(data.sleep.timeInBed)} />}
@@ -1352,17 +1550,26 @@ export function SleepView({ data }: ViewProps) {
             {hasValue(data.sleep.minutesAfterWakeUp) && <TinyStat label="After waking" value={formatMinutes(data.sleep.minutesAfterWakeUp)} />}
             <StageTransitions counts={stageTransitions} />
           </div>
-        </Panel>
+        </ChartPanel>
       )}
 
       {/* Transitions can arrive without a segment timeline, and they are still
           the night's structure — worth their own row rather than nothing. */}
       {stageTimeline.length === 0 && hasStageTransitions && (
-        <Panel className="chart-panel" category="sleep">
-          <PanelHeader eyebrow="Recorded night" title="Stage episodes" icon={SignalIcon} />
+        <ChartPanel
+          chartId="sleep-stage-episodes"
+          category="sleep"
+          eyebrow="Recorded night"
+          title="Stage episodes"
+          icon={SignalIcon}
+          window="Recorded night"
+          readings={stageEpisodeReadings}
+          note={stageEpisodeNote}
+          {...chartProps}
+        >
           <div className="sleep-detail-stats"><StageTransitions counts={stageTransitions} /></div>
-          <p className="chart-note">How many separate times each stage was entered on {data.selectedDate}. A stage the device did not report is absent, not zero episodes.</p>
-        </Panel>
+          <p className="chart-note">{stageEpisodeNote}</p>
+        </ChartPanel>
       )}
 
       {(sleepCount > 1 || efficiencyCount > 1) && (
@@ -1370,13 +1577,25 @@ export function SleepView({ data }: ViewProps) {
           <SectionTitle title="Sleep trends" copy="Duration and efficiency of recorded nights." />
           <div className="chart-grid sleep-history-grid">
             {sleepCount > 1 && (
-              <Panel className="chart-panel sleep-trend-panel" category="sleep">
-                <PanelHeader eyebrow={`${sleepCount} nights with data`} title="Duration per night" icon={SleepIcon} />
+              <ChartPanel
+                chartId="sleep-duration-trend"
+                className="sleep-trend-panel"
+                category="sleep"
+                eyebrow={`${sleepCount} nights with data`}
+                title="Duration per night"
+                icon={SleepIcon}
+                window={`${sleepCount} nights with data`}
+                readings={[
+                  ...(hasValue(data.sleep.totalMinutes) ? [{ label: `Duration on ${data.selectedDate}`, value: compactMinutes(data.sleep.totalMinutes) }] : []),
+                  ...(hasValue(data.sleep.goalMinutes) ? [{ label: 'Nightly goal drawn on the chart', value: compactMinutes(data.sleep.goalMinutes) }] : []),
+                ]}
+                {...chartProps}
+              >
                 <ColumnChart values={sleepValues} labels={trendLabels(data)} xValues={trendXValues(data)} target={data.sleep.goalMinutes} color="var(--category-sleep)" height={196} formatter={(value) => compactMinutes(value)} ariaLabel="Minutes of sleep per night" />
-              </Panel>
+              </ChartPanel>
             )}
-            <MetricTrendPanel data={data} category="sleep" icon={GaugeIcon} title="Efficiency" values={efficiencyValues} formatter={(value) => `${formatNumber(value)}%`} target={90} />
-            <MetricTrendPanel data={data} category="sleep" icon={TrendIcon} title="Sleep score" values={scoreValues} formatter={(value) => `${formatNumber(value)} / 100`} />
+            <MetricTrendPanel {...chartProps} chartId="sleep-efficiency-trend" data={data} category="sleep" icon={GaugeIcon} title="Efficiency" values={efficiencyValues} formatter={(value) => `${formatNumber(value)}%`} target={90} />
+            <MetricTrendPanel {...chartProps} chartId="sleep-score-trend" data={data} category="sleep" icon={TrendIcon} title="Sleep score" values={scoreValues} formatter={(value) => `${formatNumber(value)} / 100`} />
           </div>
         </section>
       )}
@@ -1386,8 +1605,20 @@ export function SleepView({ data }: ViewProps) {
           <SectionTitle title="Sleep distribution" copy={`Across the ${data.trends.length} ${dayWord(data.trends.length)} in view. Nights with no recorded sleep are excluded, not counted as zero.`} />
           <div className="chart-grid sleep-analysis-grid">
             {sleepCount >= MINIMUM_HISTOGRAM_NIGHTS && (
-              <Panel className="chart-panel" category="sleep">
-                <PanelHeader eyebrow={`${sleepCount} nights with data`} title="Duration distribution" icon={SleepIcon} />
+              <ChartPanel
+                chartId="sleep-duration-histogram"
+                category="sleep"
+                eyebrow={`${sleepCount} nights with data`}
+                title="Duration distribution"
+                icon={SleepIcon}
+                window={`${sleepCount} nights with data`}
+                readings={durationBins.map((bin) => ({
+                  label: `${compactMinutes(Math.round(bin.start))}–${compactMinutes(Math.round(bin.end))}`,
+                  value: `${formatNumber(bin.count)} ${bin.count === 1 ? 'night' : 'nights'}`,
+                }))}
+                note="Six equal-width bands across the shortest and longest recorded night."
+                {...chartProps}
+              >
                 <ColumnChart
                   values={durationBins.map((bin) => bin.count)}
                   labels={durationBins.map((bin) => `${compactMinutes(Math.round(bin.start))}–${compactMinutes(Math.round(bin.end))}`)}
@@ -1397,12 +1628,25 @@ export function SleepView({ data }: ViewProps) {
                   ariaLabel="Recorded nights grouped by sleep duration"
                 />
                 <p className="chart-note">Six equal-width bands across the shortest and longest recorded night.</p>
-              </Panel>
+              </ChartPanel>
             )}
 
             {durationScatter.length > 1 && (
-              <Panel className="chart-panel" category="sleep">
-                <PanelHeader eyebrow={`${durationScatter.length} paired ${durationScatter.length === 1 ? 'night' : 'nights'}`} title="Duration against efficiency" icon={GaugeIcon} />
+              <ChartPanel
+                chartId="sleep-duration-efficiency-scatter"
+                category="sleep"
+                eyebrow={`${durationScatter.length} paired ${durationScatter.length === 1 ? 'night' : 'nights'}`}
+                title="Duration against efficiency"
+                icon={GaugeIcon}
+                window={`${durationScatter.length} paired ${durationScatter.length === 1 ? 'night' : 'nights'}`}
+                readings={[{
+                  label: 'Correlation printed under the chart',
+                  value: efficiencyCorrelation
+                    ? `r = ${efficiencyCorrelation.r.toFixed(2)} over ${efficiencyCorrelation.sampleCount} paired readings`
+                    : 'No correlation reported — too few paired readings, or no variation to correlate',
+                }]}
+                {...chartProps}
+              >
                 <ScatterChart
                   points={durationScatter}
                   xLabel="Duration"
@@ -1413,7 +1657,7 @@ export function SleepView({ data }: ViewProps) {
                   formatY={(value) => `${formatNumber(Math.round(value))}%`}
                   ariaLabel="Sleep duration against efficiency, one point per night"
                 />
-              </Panel>
+              </ChartPanel>
             )}
           </div>
         </section>
@@ -1433,7 +1677,8 @@ function BodyMetric({ label, value, unit, icon: Icon, note }: { label: string; v
   )
 }
 
-export function BodyView({ data, profile }: ViewProps) {
+export function BodyView({ data, profile, onImprove, favourites, onToggleFavourite }: ViewProps) {
+  const chartProps = { favourites, onToggleFavourite, onExplain: onImprove }
   const weightValues = data.trends.map((point) => point.weight)
   const weightCount = weightValues.filter(hasValue).length
   const balancePoints = energyBalance(data.trends)
@@ -1456,8 +1701,23 @@ export function BodyView({ data, profile }: ViewProps) {
     <div className="page-stack body-page">
       <div className="body-layout">
         {hasValue(data.body.weightKg) && (
-          <Panel className="weight-card" category="body">
-            <PanelHeader eyebrow={`${weightCount} measurements`} title="Weight" icon={BodyIcon} />
+          <ChartPanel
+            chartId="body-weight"
+            className="weight-card"
+            category="body"
+            eyebrow={`${weightCount} measurements`}
+            title="Weight"
+            icon={BodyIcon}
+            window={`${weightCount} measurements`}
+            readings={[
+              { label: 'Latest weight', value: `${formatDecimal(data.body.weightKg)} kg` },
+              ...(hasValue(data.body.weightGoalKg) ? [
+                { label: 'Goal', value: `${formatDecimal(data.body.weightGoalKg)} kg` },
+                { label: 'Difference from goal', value: `${formatDecimal(data.body.weightKg - data.body.weightGoalKg)} kg` },
+              ] : []),
+            ]}
+            {...chartProps}
+          >
             <div className="body-weight-value"><strong>{formatDecimal(data.body.weightKg)}</strong><span>kg</span></div>
             {hasValue(data.body.weightGoalKg) && (
               <div className="weight-goal-copy">
@@ -1468,7 +1728,7 @@ export function BodyView({ data, profile }: ViewProps) {
             {weightCount > 1 && (
               <LineChart values={weightValues} labels={trendLabels(data)} xValues={trendXValues(data)} target={data.body.weightGoalKg} targetLabel="Goal" height={238} formatter={(value) => `${formatDecimal(value)} kg`} ariaLabel="Weight trend" />
             )}
-          </Panel>
+          </ChartPanel>
         )}
 
         {(hasComposition || hasDaily) && (
@@ -1504,12 +1764,16 @@ export function BodyView({ data, profile }: ViewProps) {
       {balanceCount > 0 && (
         <section>
           <SectionTitle title="Energy balance" copy="Logged intake minus logged expenditure, one column per day." />
-          <Panel className="chart-panel" category="body">
-            <PanelHeader
-              eyebrow={`${balanceCount} of ${data.trends.length} ${dayWord(data.trends.length)} with both sides logged`}
-              title="Intake against expenditure"
-              icon={NutritionIcon}
-            />
+          <ChartPanel
+            chartId="body-energy-balance"
+            category="body"
+            eyebrow={`${balanceCount} of ${data.trends.length} ${dayWord(data.trends.length)} with both sides logged`}
+            title="Intake against expenditure"
+            icon={NutritionIcon}
+            window={`${balanceCount} of ${data.trends.length} ${dayWord(data.trends.length)} with both sides logged`}
+            note="A day missing either side is shown as no data. An unlogged meal is absent, not a deficit."
+            {...chartProps}
+          >
             <DivergingColumnChart
               values={balancePoints.map((point) => point.balance)}
               labels={balancePoints.map((point) => formatDate(point.date, { day: 'numeric', month: 'short' }))}
@@ -1520,7 +1784,7 @@ export function BodyView({ data, profile }: ViewProps) {
               ariaLabel="Daily energy balance against a zero baseline"
             />
             <p className="chart-note">A day missing either side is shown as no data. An unlogged meal is absent, not a deficit.</p>
-          </Panel>
+          </ChartPanel>
         </section>
       )}
 
@@ -1528,9 +1792,9 @@ export function BodyView({ data, profile }: ViewProps) {
         <section>
           <SectionTitle title="Body and log trends" copy="Only measurements recorded during the synced period." />
           <div className="metric-trend-grid">
-            <MetricTrendPanel data={data} category="body" icon={SignalIcon} title="Body fat" values={data.trends.map((point) => point.bodyFat)} formatter={(value) => `${formatDecimal(value)}%`} />
-            <MetricTrendPanel data={data} category="body" icon={WaterIcon} title="Hydration" values={data.trends.map((point) => point.waterMl)} formatter={(value) => `${formatNumber(value)} ml`} />
-            <MetricTrendPanel data={data} category="body" icon={CaloriesIcon} title="Calories consumed" values={data.trends.map((point) => point.caloriesIn)} formatter={(value) => `${formatNumber(value)} kcal`} />
+            <MetricTrendPanel {...chartProps} chartId="body-trend-fat" data={data} category="body" icon={SignalIcon} title="Body fat" values={data.trends.map((point) => point.bodyFat)} formatter={(value) => `${formatDecimal(value)}%`} />
+            <MetricTrendPanel {...chartProps} chartId="body-trend-hydration" data={data} category="body" icon={WaterIcon} title="Hydration" values={data.trends.map((point) => point.waterMl)} formatter={(value) => `${formatNumber(value)} ml`} />
+            <MetricTrendPanel {...chartProps} chartId="body-trend-calories-in" data={data} category="body" icon={CaloriesIcon} title="Calories consumed" values={data.trends.map((point) => point.caloriesIn)} formatter={(value) => `${formatNumber(value)} kcal`} />
           </div>
         </section>
       )}
@@ -1539,6 +1803,8 @@ export function BodyView({ data, profile }: ViewProps) {
           <SectionTitle title="Body mass index" copy="Derived per day from the weight recorded that day and the height in your profile." />
           <div className="metric-trend-grid">
             <MetricTrendPanel
+              {...chartProps}
+              chartId="body-bmi"
               data={data}
               category="body"
               icon={GaugeIcon}
@@ -1565,7 +1831,8 @@ function CoverageRow({ icon: Icon, label, items }: { icon: AppIcon; label: strin
   )
 }
 
-export function DevicesView({ data, status, profile }: ViewProps) {
+export function DevicesView({ data, status, profile, onImprove, favourites, onToggleFavourite }: ViewProps) {
+  const chartProps = { favourites, onToggleFavourite, onExplain: onImprove }
   const missingProfileFields = profileCompleteness(profile).missing
   const movement = [
     hasValue(data.activity.steps) && 'steps',
@@ -1591,6 +1858,7 @@ export function DevicesView({ data, status, profile }: ViewProps) {
   const isConnected = status.connected || isDemo
   const sourceName = isDemo ? 'Sample data' : status.provider === 'fitbit-legacy' ? 'Fitbit legacy' : 'Google Health'
   const deviceName = data.device?.name ?? (isDemo ? 'Google Fitbit Air' : sourceName)
+  const syncErrorNote = `Everything these sources would have supplied is missing for this day, not measured as nil. The other ${data.sync.successCount} sources are unaffected.`
 
   return (
     <div className="page-stack devices-page">
@@ -1621,8 +1889,23 @@ export function DevicesView({ data, status, profile }: ViewProps) {
           </div>
         </div>
 
-        <Panel className="coverage-card" category="device">
-          <PanelHeader eyebrow="Sync quality" title="Data coverage" icon={CloudIcon} />
+        <ChartPanel
+          chartId="devices-coverage"
+          className="coverage-card"
+          category="device"
+          eyebrow="Sync quality"
+          title="Data coverage"
+          icon={CloudIcon}
+          readings={[
+            { label: 'Available sources', value: `${data.sync.successCount} / ${data.sync.endpointCount}` },
+            { label: 'Movement', value: movement.length ? movement.join(' · ') : 'No data' },
+            { label: 'Heart', value: heart.length ? heart.join(' · ') : 'No data' },
+            { label: 'Sleep', value: sleep.length ? sleep.join(' · ') : 'No data' },
+            { label: 'Nightly signals', value: nightly.length ? nightly.join(' · ') : 'No data' },
+            { label: 'Body and nutrition', value: body.length ? body.join(' · ') : 'No data' },
+          ]}
+          {...chartProps}
+        >
           <BulletChart
             value={data.sync.successCount}
             target={data.sync.endpointCount}
@@ -1642,23 +1925,29 @@ export function DevicesView({ data, status, profile }: ViewProps) {
             <Separator />
             <CoverageRow icon={BodyIcon} label="Body and nutrition" items={body} />
           </div>
-        </Panel>
+        </ChartPanel>
       </div>
 
       {data.sync.errors.length > 0 && (
-        <Panel className="sync-error-panel" category="device">
-          <PanelHeader
-            eyebrow={`${data.sync.errors.length} of ${data.sync.endpointCount} sources`}
-            title={`Sources with no data for ${data.selectedDate}`}
-            icon={InfoIcon}
-          />
+        <ChartPanel
+          chartId="devices-sync-errors"
+          className="sync-error-panel"
+          category="device"
+          eyebrow={`${data.sync.errors.length} of ${data.sync.endpointCount} sources`}
+          title={`Sources with no data for ${data.selectedDate}`}
+          icon={InfoIcon}
+          window={data.selectedDate}
+          readings={data.sync.errors.map((error) => ({ label: error.key, value: error.message }))}
+          note={syncErrorNote}
+          {...chartProps}
+        >
           <ul className="sync-error-list">
             {data.sync.errors.map((error) => (
               <li key={error.key}><strong>{error.key}</strong><span>{error.message}</span></li>
             ))}
           </ul>
-          <p className="chart-note">Everything these sources would have supplied is missing for this day, not measured as nil. The other {data.sync.successCount} sources are unaffected.</p>
-        </Panel>
+          <p className="chart-note">{syncErrorNote}</p>
+        </ChartPanel>
       )}
 
       {/* The unlock sentences come from `UNLOCKS`, the same list the profile form
