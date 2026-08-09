@@ -1,0 +1,89 @@
+'use strict'
+
+const nodeCrypto = require('node:crypto')
+const nodeFs = require('node:fs')
+const path = require('node:path')
+
+const TOKEN_FILE = 'server-token'
+const COOKIE_NAME = 'openfit_token'
+const TOKEN_BYTES = 32
+const COOKIE_MAX_AGE_SECONDS = 365 * 24 * 60 * 60
+
+function loadOrCreateToken({ dir, fs, randomBytes }) {
+  const file = path.join(dir, TOKEN_FILE)
+  try {
+    const token = fs.readFileSync(file, 'utf8').trim()
+    if (token) return token
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
+  }
+  const token = randomBytes(TOKEN_BYTES).toString('hex')
+  try {
+    fs.writeFileSync(file, `${token}\n`, { mode: 0o600, flag: 'wx' })
+    return token
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error
+    return fs.readFileSync(file, 'utf8').trim()
+  }
+}
+
+function parseCookies(header) {
+  const jar = {}
+  for (const part of String(header || '').split(';')) {
+    const index = part.indexOf('=')
+    if (index < 0) continue
+    jar[part.slice(0, index).trim()] = decodeURIComponent(part.slice(index + 1).trim())
+  }
+  return jar
+}
+
+function bearerFrom(header) {
+  const match = /^Bearer\s+(.+)$/i.exec(String(header || '').trim())
+  return match ? match[1].trim() : null
+}
+
+// Length-independent, constant-time comparison.
+function sameToken(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  const left = nodeCrypto.createHash('sha256').update(a).digest()
+  const right = nodeCrypto.createHash('sha256').update(b).digest()
+  return nodeCrypto.timingSafeEqual(left, right)
+}
+
+function createAuth(options = {}) {
+  const fs = options.fs || nodeFs
+  const randomBytes = options.randomBytes || nodeCrypto.randomBytes
+  const token = options.token || loadOrCreateToken({ dir: options.dir, fs, randomBytes })
+
+  return {
+    token,
+    cookieName: COOKIE_NAME,
+
+    presentedToken(request) {
+      const url = new URL(request.url, 'http://localhost')
+      const fromQuery = url.searchParams.get('token')
+      if (fromQuery) return fromQuery
+      const fromHeader = bearerFrom(request.headers?.authorization)
+      if (fromHeader) return fromHeader
+      return parseCookies(request.headers?.cookie)[COOKIE_NAME] || null
+    },
+
+    isAuthorized(request) {
+      return sameToken(this.presentedToken(request), token)
+    },
+
+    // Host-only; `Secure` is omitted because the tailnet URL is plain http unless
+    // the operator fronts it with `tailscale serve`.
+    setCookie(response) {
+      response.setHeader('Set-Cookie', [
+        `${COOKIE_NAME}=${encodeURIComponent(token)}`,
+        'Path=/',
+        'HttpOnly',
+        'SameSite=Lax',
+        `Max-Age=${COOKIE_MAX_AGE_SECONDS}`,
+      ].join('; '))
+    },
+  }
+}
+
+module.exports = { createAuth, sameToken, parseCookies, bearerFrom, TOKEN_FILE, COOKIE_NAME }

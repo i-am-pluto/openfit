@@ -4,7 +4,7 @@
 
 <h1 align="center">OpenFit</h1>
 
-OpenFit is a private, desktop-first Electron dashboard for Google Fitbit Air and other Fitbit devices. Its adaptive interface prioritizes a small set of useful insights and only displays views, metrics, and navigation when Google Health returns real data.
+OpenFit is a private dashboard for Google Fitbit Air and other Fitbit devices. It runs as an Electron desktop app or as a small self-hosted server you can reach from your phone over Tailscale. Its adaptive interface prioritizes a small set of useful insights and only displays views, metrics, and navigation when Google Health returns real data.
 
 <p align="center">
   <img src="public/openfit-screenshot.webp" alt="OpenFit desktop dashboard screenshot" width="960">
@@ -35,18 +35,37 @@ Requirements:
 
 - Node.js 22 or later;
 - npm 10 or later;
-- Codex Desktop and a signed-in Codex account, only if you want to use the health assistant. OpenFit reuses the local login and does not require an API key.
+- Codex Desktop or Claude Code, only if you want to use the health assistant. OpenFit reuses whichever local login you already have and never needs an API key. See [assistant backends](docs/AGENTS.md).
 
 ```bash
 npm install
 npm run dev
 ```
 
+### Run it as a server
+
+To use OpenFit from your phone or another machine on the same tailnet:
+
+```bash
+npm run serve
+```
+
+This builds the renderer and starts the HTTP server, printing one URL per
+reachable address with Tailscale addresses first. Open the tailnet URL on your
+phone; the access token moves into a cookie on first visit. Full setup, access
+control, and `systemd` notes are in the [self-hosting guide](docs/SELF_HOSTING.md).
+
+The desktop app and the server run the same backend — Electron starts that
+server on loopback and opens a window onto it — so there is one implementation
+to keep correct, not two.
+
 Useful commands:
 
 ```bash
 npm run build       # Type-check and bundle the renderer
-npm test            # Run normalizer and adapter tests
+npm run serve       # Build, then host on the local network
+npm test            # Run normalizer, adapter, agent, and server tests
+npm run check       # Type-check, syntax-check, test, and build
 npm run capture:ui  # Run desktop/mobile visual QA in Electron Chromium
 npm run dist        # Package the app for macOS, Windows, or Linux
 ```
@@ -178,22 +197,36 @@ For a longer checklist, see [Google Health setup](docs/GOOGLE_HEALTH_SETUP.md).
 ## Project structure
 
 ```text
+core/                         Transport-agnostic backend (no Electron, no HTTP)
+  app.cjs                     Composition root: builds everything from a data directory
+  secrets.cjs                 safeStorage or AES-256-GCM envelope storage
+  credentials.cjs             Config and token storage, validation, public status
+  oauth.cjs                   PKCE flow, loopback listener, callback handling
+  sync.cjs                    Provider sync with the minimum-useful-response gate
+  health-cache.cjs            Encrypted per-day archive
+  providers/                  Google Health v4 and legacy Fitbit adapters
+  agents/                     Assistant backends behind one interface
+server/
+  bin.cjs                     CLI entry, address discovery, startup banner
+  index.cjs                   HTTP wiring and the token gate
+  auth.cjs                    Token issue, cookie, constant-time check
+  static.cjs                  dist/ serving with security headers
+  routes/                     health, assistant, events (SSE), oauth
 electron/
-  main.cjs                    Electron shell, OAuth loopback, IPC, encrypted storage
-  preload.cjs                 Minimal typed IPC bridge
-  codex-service.cjs           Read-only Codex app-server JSONL client
-  google-health-service.cjs   Google Health API v4 provider
-  fitbit-legacy-service.cjs   Legacy Fitbit Web API provider with PKCE
+  main.cjs                    Desktop shell: starts the core server on loopback
 src/
   components/                 Views, charts, and assistant-ui chat
   data/                       Demo data and provider-independent normalization
-  lib/                        Formatting and pure utilities
+  lib/api.ts                  fetch + SSE client, the renderer's only data path
   App.tsx                     UI and connection-state orchestration
-  types.ts                    Shared renderer/preload contracts
+  types.ts                    Shared renderer/backend contracts
 scripts/
   capture-ui.cjs              Electron visual smoke test
+  check-node-syntax.cjs       Syntax-checks every shipped CommonJS file
 docs/
   ARCHITECTURE.md             System decisions and boundaries
+  SELF_HOSTING.md             Running the server, Tailscale, systemd
+  AGENTS.md                   Assistant backend interface and how to add one
   DATA_COVERAGE.md            Data coverage and limitations
   GOOGLE_HEALTH_SETUP.md      Extended OAuth setup guide
   RELEASE.md                  Signing, notarization, and release process
@@ -211,11 +244,28 @@ See [Architecture](docs/ARCHITECTURE.md) for security boundaries and design deci
 
 ## Health assistant
 
-The chat button in the top bar opens a right-side panel built with assistant-ui primitives. Its bridge uses `codex app-server`, the same local interface used by Codex clients, with a read-only sandbox, approvals disabled, and tool calls denied by default.
+The chat button in the top bar opens a right-side panel built with assistant-ui primitives. Two backends are supported and either may be used:
 
-When you send a message, OpenFit creates a compact context containing normalized metrics, available dates, and details for the selected day. It does not include OAuth credentials or encrypted files. This context is sent to Codex/OpenAI only after you use the chat. Codex may navigate to an OpenFit view or date, but it cannot modify health data.
+| Backend | Requires | Transport |
+| --- | --- | --- |
+| Codex | Codex Desktop, signed in | `codex app-server` over JSONL |
+| Claude Code | `claude` on your `PATH`, signed in | `claude -p --output-format stream-json` |
 
-No Codex model name is hard-coded in this repository. The app-server selects its configured default model unless a model is supplied programmatically through the service options.
+OpenFit reuses whichever local login you already have; no API key is stored or
+required. The first available backend is selected automatically, and a picker
+appears in the assistant header when both are installed. See
+[assistant backends](docs/AGENTS.md) for the interface and how to add another.
+
+Both run with the same instructions and the same restrictions: a read-only,
+network-disabled sandbox for Codex, and every tool denied with slash commands,
+MCP, and user settings disabled for Claude Code. Neither can read your files,
+run commands, or browse the web.
+
+When you send a message, OpenFit creates a compact context containing normalized
+metrics, available dates, and details for the selected day. It does not include
+OAuth credentials or encrypted files, and it is sent only when you use the chat.
+The assistant may navigate to an OpenFit view or date, but it cannot modify
+health data.
 
 ## Official references
 

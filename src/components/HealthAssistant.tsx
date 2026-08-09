@@ -11,6 +11,7 @@ import {
   type ThreadMessage,
 } from '@assistant-ui/react'
 import { ArrowDown, ArrowUp, Plus, Sparkles, Square, X } from 'lucide-react'
+import { fitbit, healthAssistant } from '@/lib/api'
 import { normalizeFitbitData } from '@/data/normalize'
 import {
   buildHealthAssistantContext,
@@ -20,6 +21,7 @@ import {
   type AssistantNavigation,
 } from '@/lib/health-assistant'
 import type {
+  AgentSummary,
   DashboardData,
   HealthAssistantEvent,
   HealthAssistantStatus,
@@ -28,10 +30,11 @@ import type {
 } from '@/types'
 
 const unavailableStatus: HealthAssistantStatus = {
+  id: null,
+  label: 'Assistant',
   available: false,
   connected: false,
   authenticated: false,
-  version: null,
 }
 
 function messageText(message: ThreadMessage | undefined) {
@@ -50,11 +53,11 @@ function archiveData(archive: RawHealthArchive | null | undefined) {
     .sort((left, right) => left.selectedDate.localeCompare(right.selectedDate))
 }
 
-function statusLabel(status: HealthAssistantStatus, hasBridge: boolean) {
-  if (!hasBridge) return 'Desktop only'
-  if (!status.available) return 'Codex not found'
-  if (!status.authenticated) return 'Sign in to Codex'
-  return status.connected ? 'Codex connected' : 'Codex ready'
+function statusLabel(status: HealthAssistantStatus) {
+  const name = status.label || 'Assistant'
+  if (!status.available) return `${name} not found`
+  if (!status.authenticated) return `Sign in to ${name}`
+  return status.connected ? `${name} connected` : `${name} ready`
 }
 
 function createQueue() {
@@ -96,23 +99,36 @@ export function HealthAssistant({
   const pageRef = useRef(page)
   const navigateRef = useRef(onNavigate)
   const [status, setStatus] = useState(unavailableStatus)
+  const [agents, setAgents] = useState<AgentSummary[]>([])
 
   useEffect(() => { dataRef.current = data }, [data])
   useEffect(() => { pageRef.current = page }, [page])
   useEffect(() => { navigateRef.current = onNavigate }, [onNavigate])
 
   const refreshStatus = useCallback(async () => {
-    if (!window.healthAssistant) {
-      setStatus(unavailableStatus)
-      return
-    }
     try {
-      setStatus(await window.healthAssistant.getStatus())
+      const listed = await healthAssistant.listAgents()
+      setAgents(listed.agents)
+      setStatus(listed.status)
     } catch (error) {
+      setAgents([])
       setStatus({
         ...unavailableStatus,
-        error: error instanceof Error ? error.message : 'Codex is unavailable.',
+        error: error instanceof Error ? error.message : 'The assistant is unavailable.',
       })
+    }
+  }, [])
+
+  const selectAgent = useCallback(async (agentId: string) => {
+    try {
+      const selection = await healthAssistant.selectAgent(agentId)
+      setAgents(selection.agents)
+      setStatus(selection.status)
+    } catch (error) {
+      setStatus((current) => ({
+        ...current,
+        error: error instanceof Error ? error.message : 'Could not switch the assistant backend.',
+      }))
     }
   }, [])
 
@@ -123,16 +139,15 @@ export function HealthAssistant({
 
   const modelAdapter = useMemo<ChatModelAdapter>(() => ({
     async *run({ messages, abortSignal }) {
-      const bridge = window.healthAssistant
-      if (!bridge) throw new Error('Launch OpenFit in the desktop app to use the health assistant.')
+      const bridge = healthAssistant
 
       const prompt = messageText(messages.at(-1))
       if (!prompt) throw new Error('Write a question before sending it.')
 
       let archived: DashboardData[] = []
-      if (window.fitbit && dataRef.current.source !== 'demo') {
+      if (dataRef.current.source !== 'demo') {
         try {
-          archived = archiveData(await window.fitbit.getCachedArchive())
+          archived = archiveData(await fitbit.getCachedArchive())
         } catch {
           archived = []
         }
@@ -177,7 +192,7 @@ export function HealthAssistant({
         const navigation = parseAssistantNavigation(fullText)
         const finalText = stripAssistantNavigation(fullText)
         if (navigation) navigateRef.current(navigation)
-        if (!finalText) throw new Error('Codex completed the turn without a response.')
+        if (!finalText) throw new Error('The assistant completed the turn without a response.')
         if (finalText !== lastVisibleText) {
           yield { content: [{ type: 'text', text: finalText }] }
         }
@@ -191,7 +206,7 @@ export function HealthAssistant({
   }), [refreshStatus])
 
   const runtime = useLocalRuntime(modelAdapter)
-  const ready = Boolean(window.healthAssistant && status.available && status.authenticated)
+  const ready = Boolean(status.available && status.authenticated)
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -204,9 +219,11 @@ export function HealthAssistant({
       >
         <AssistantHeader
           status={status}
+          agents={agents}
           ready={ready}
           onClose={() => onOpenChange(false)}
           onStatusRefresh={refreshStatus}
+          onSelectAgent={selectAgent}
         />
         <AssistantThread ready={ready} />
       </aside>
@@ -217,21 +234,25 @@ export function HealthAssistant({
 
 function AssistantHeader({
   status,
+  agents,
   ready,
   onClose,
   onStatusRefresh,
+  onSelectAgent,
 }: {
   status: HealthAssistantStatus
+  agents: AgentSummary[]
   ready: boolean
   onClose: () => void
   onStatusRefresh: () => Promise<void>
+  onSelectAgent: (agentId: string) => Promise<void>
 }) {
   const runtime = useAssistantRuntime()
 
   const newConversation = async () => {
     runtime.thread.cancelRun()
     runtime.thread.reset()
-    await window.healthAssistant?.reset()
+    await healthAssistant.reset()
     await onStatusRefresh()
   }
 
@@ -241,10 +262,25 @@ function AssistantHeader({
         <span className="assistant-mark"><Sparkles aria-hidden="true" /></span>
         <span>
           <strong>Health assistant</strong>
-          <small><i className={ready ? 'is-ready' : ''} />{statusLabel(status, Boolean(window.healthAssistant))}</small>
+          <small><i className={ready ? 'is-ready' : ''} />{statusLabel(status)}</small>
         </span>
       </div>
       <div className="assistant-header-actions">
+        {agents.length > 1 && (
+          <select
+            className="assistant-agent"
+            aria-label="Assistant backend"
+            title="Assistant backend"
+            value={status.id ?? ''}
+            onChange={(event) => void onSelectAgent(event.target.value)}
+          >
+            {agents.map((agent) => (
+              <option key={agent.id ?? ''} value={agent.id ?? ''} disabled={!agent.available}>
+                {agent.available ? agent.label : `${agent.label} (not installed)`}
+              </option>
+            ))}
+          </select>
+        )}
         <button type="button" aria-label="New conversation" title="New conversation" onClick={() => void newConversation()}>
           <Plus aria-hidden="true" />
         </button>
